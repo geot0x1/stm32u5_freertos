@@ -27,8 +27,8 @@ SpaceBeforeParens: ControlStatements
 
 BreakBeforeBinaryOperators: NonAssignment
 AlignOperands: true
-ColumnLimit: 80
-BinPackArguments: true
+ColumnLimit: 0                # disables line length limit (no automatic line breaks)
+BreakBeforeBinaryOperators: None
 AllowAllArgumentsOnNextLine: true
 
 
