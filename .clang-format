@@ -17,6 +17,7 @@ BraceWrapping:
 
 BreakBeforeBraces: Allman
 
+
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: false
@@ -24,7 +25,9 @@ AllowShortCaseLabelsOnASingleLine: false
 PointerAlignment: Left
 SpaceBeforeParens: ControlStatements
 
-ColumnLimit: 120
+BreakBeforeBinaryOperators: NonAssignment
+AlignOperands: true
+ColumnLimit: 80
 BinPackArguments: true
 AllowAllArgumentsOnNextLine: true
 
