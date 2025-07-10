@@ -24,5 +24,8 @@ AllowShortCaseLabelsOnASingleLine: false
 PointerAlignment: Left
 SpaceBeforeParens: ControlStatements
 
-BinPackArguments: false
-AllowAllArgumentsOnNextLine: false
+ColumnLimit: 120
+BinPackArguments: true
+AllowAllArgumentsOnNextLine: true
+
+

@@ -56,8 +56,7 @@ static void test_task(void* args)
         // printf("Hello from FreeRTOS task!\n\r");
         uart_send_blocking("STM32U5xx FreeRTOS Example\n\r");
         BSP_LED_Toggle(LED_GREEN);
-        vTaskDelay(
-            pdMS_TO_TICKS(500)); // half-second delay for visible blinking
+        vTaskDelay(pdMS_TO_TICKS(500)); // half-second delay for visible blinking
     }
 }
 
@@ -152,12 +151,7 @@ int main(void)
 
     BSP_LED_On(LED_GREEN);
 
-    xTaskCreate(test_task,
-                "TestTask",
-                configMINIMAL_STACK_SIZE,
-                NULL,
-                tskIDLE_PRIORITY,
-                NULL);
+    xTaskCreate(test_task, "TestTask", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
 
     /* Start the scheduler */
     vTaskStartScheduler();
@@ -201,9 +195,8 @@ void SystemClock_Config(void)
 
     /** Initializes the CPU, AHB and APB buses clocks
      */
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                  RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
-                                  RCC_CLOCKTYPE_PCLK3;
+    RCC_ClkInitStruct.ClockType =
+        RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_PCLK3;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
