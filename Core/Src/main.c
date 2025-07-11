@@ -113,18 +113,11 @@ int main(void)
 {
     HAL_Init();
     WWDG->CR &= ~(1 << 7);
-
-    for (int irq = 0; irq < 56; irq++) // 150 is a safe upper bound for STM32U5
-    {
-        // NVIC_DisableIRQ((IRQn_Type)irq);
-    }
     __set_PRIMASK(1);
-    // NVIC_DisableIRQ((IRQn_Type)56);
+    
 
     /* Configure the system clock */
     SystemClock_Config();
-
-    // __disable_irq(); // Disable interrupts globally
 
     /* Configure the System Power */
     SystemPower_Config();
@@ -159,9 +152,12 @@ int main(void)
     while (1)
     {
         uart_send_blocking("STM32U5xx FreeRTOS Example\n\r");
-        // printf("Welcome to STM32 world !\n\r");
         BSP_LED_Toggle(LED_GREEN);
-        // HAL_Delay(500); // half-second delay for visible blinking
+        
+        for (int i = 0; i < 100000; i++)
+        {
+            __NOP(); // Simple delay
+        }
     }
 }
 
