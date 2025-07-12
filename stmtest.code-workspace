@@ -26,6 +26,11 @@
                "name": "   $(triangle-right) Run   ",
                "color": "lightgreen",
                "command": "stmtool.py run ${workspaceFolder}",
+            },
+            {
+                "name": "Chip Erase",
+                "color": "red",
+                "command": "stmtool.py chip-erase",
             }
         ]
     },
@@ -34,7 +39,8 @@
         "freertos.h": "c",
         "stm32u5xx_ll_utils.h": "c",
         "stm32u5xx_ll_gpio.h": "c",
-        "stm32u5xx.h": "c"
+        "stm32u5xx.h": "c",
+        "stm32u5xx_nucleo_conf.h": "c"
     }
     }
 }

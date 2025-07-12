@@ -1,21 +1,3 @@
-/* USER CODE BEGIN Header */
-/**
- ******************************************************************************
- * @file           : main.c
- * @brief          : Main program body
- ******************************************************************************
- * @attention
- *
- * Copyright (c) 2025 STMicroelectronics.
- * All rights reserved.
- *
- * This software is licensed under terms that can be found in the LICENSE file
- * in the root directory of this software component.
- * If no LICENSE file comes with this software, it is provided AS-IS.
- *
- ******************************************************************************
- */
-
 #include "main.h"
 #include "FreeRTOS.h"
 #include "stm32u545xx.h"
@@ -24,6 +6,9 @@
 #include "stm32u5xx_ll_gpio.h"
 #include "stm32u5xx_ll_usart.h"
 #include "task.h"
+#include "drv8825.h"
+
+
 
 COM_InitTypeDef BspCOMInit;
 __IO uint32_t BspButtonState = BUTTON_RELEASED;
@@ -49,14 +34,40 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName)
     }
 }
 
+
+
+static Drv8825 motor = {
+    .step_port = GPIOB,
+    .step_pin = GPIO_PIN_10,
+    .dir_port = GPIOA,
+    .dir_pin = GPIO_PIN_8,
+    .enable_port = GPIOB,
+    .enable_pin = GPIO_PIN_4,
+};
+
 static void test_task(void* args)
 {
+    printf("Test task started\n\r");
+
+
+    motor_init(&motor);
+    motor_enable(&motor);
+
+    uint32_t step_count = 0;
+    int diretion = 0;
+    
     while (1)
     {
-        // printf("Hello from FreeRTOS task!\n\r");
-        uart_send_blocking("STM32U5xx FreeRTOS Example\n\r");
         BSP_LED_Toggle(LED_GREEN);
-        vTaskDelay(pdMS_TO_TICKS(500)); // half-second delay for visible blinking
+
+        motor_enable(&motor);
+        motor_steps(&motor, 200); // Adjust the number of steps as needed
+        motor_disable(&motor);
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        // motor_direction_set(diretion); // Set direction to one way
+        // diretion = !diretion; // Toggle direction
+
     }
 }
 
@@ -109,12 +120,51 @@ void uart1_init(void)
     }
 }
 
+void set_PB4_high(void)
+{
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET);
+}
+
+void set_PB4_low(void)
+{
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
+}
+
+void configure_PB10_output(void)
+{
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    // 2. Configure PB10 (D6) as output push-pull
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_10;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
+
+void configure_PB4_output(void)
+{
+    // 1. Enable the GPIOB peripheral clock
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    // 2. Configure PB4 as output push-pull
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_4;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
+}
+
+
 int main(void)
 {
     HAL_Init();
     WWDG->CR &= ~(1 << 7);
     __set_PRIMASK(1);
-    
 
     /* Configure the system clock */
     SystemClock_Config();
@@ -127,6 +177,8 @@ int main(void)
 
     /* Initialize led */
     BSP_LED_Init(LED_GREEN);
+
+    // bg96_init();
 
     /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity
      */
@@ -144,20 +196,13 @@ int main(void)
 
     BSP_LED_On(LED_GREEN);
 
-    xTaskCreate(test_task, "TestTask", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(test_task, "TestTask", 256, NULL, tskIDLE_PRIORITY, NULL);
 
     /* Start the scheduler */
     vTaskStartScheduler();
     /* We should never get here as control is now taken by the scheduler */
     while (1)
     {
-        uart_send_blocking("STM32U5xx FreeRTOS Example\n\r");
-        BSP_LED_Toggle(LED_GREEN);
-        
-        for (int i = 0; i < 100000; i++)
-        {
-            __NOP(); // Simple delay
-        }
     }
 }
 

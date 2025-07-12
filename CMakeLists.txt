@@ -51,8 +51,13 @@ target_link_libraries(freertos_kernel INTERFACE freertos_config PUBLIC stm32cube
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
+add_compile_options(-O0)
+
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
+
+add_subdirectory(Core/Src/bg96)
+add_subdirectory(Core/Src/drv8825)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -78,6 +83,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 target_link_libraries(${CMAKE_PROJECT_NAME}
                       stm32cubemx
                       freertos_kernel
+                      drv8825
                       )
 
 
