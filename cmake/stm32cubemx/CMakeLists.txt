@@ -57,6 +57,9 @@ set(STM32_Drivers_Src
 
 
     ${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_gpio.c
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_lpuart.c
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_rcc.c
+    
 )
 
 # Drivers Midllewares

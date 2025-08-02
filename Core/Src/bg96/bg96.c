@@ -7,6 +7,59 @@
 #include "task.h"
 
 
+
+typedef struct
+{
+    char response[256];
+    size_t length;
+} AtHandler;
+
+
+
+
+static int native_modem_serial_init(CellularStream* self, int baudrate)
+{
+    ModemSerial* modem_serial = self->context;
+    return modem_serial_open(modem_serial, baudrate);
+}
+
+static int native_modem_serial_write(CellularStream* self, const uint8_t* data, uint16_t len)
+{
+    ModemSerial* modem_serial = self->context;
+    return modem_serial_write(modem_serial, data, len);
+}
+
+static int native_modem_serial_read(CellularStream* self, uint8_t* data, uint16_t len)
+{
+    ModemSerial* modem_serial = self->context;
+    return modem_serial_read(modem_serial, data, len);
+}
+
+static int native_modem_serial_close(CellularStream* self)
+{
+    // If there's no close function, we can just return 0
+    return 0;
+}
+
+
+CellularStreamVtable native_stream_vtable = {
+    .open = native_modem_serial_init,
+    .write = native_modem_serial_write,
+    .read = native_modem_serial_read,
+    .close = native_modem_serial_close
+};
+
+CellularStream native_stream = {
+    .context = NULL,
+    .vtable = &native_stream_vtable
+};
+
+void send_at_command(CellularStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
+{
+
+}
+
+
 void bg96_reset_pin_init(void)
 {
     // 1. Enable GPIOB peripheral clock
@@ -81,7 +134,7 @@ void bg96_pwrkey_pin_off(void)
     bg96_pwrkey_pin_set_low();
 }
 
-void bg96_init(void)
+int bg96_init(Bg96* module)
 {
     bg96_reset_pin_init();
     bg96_pwrkey_pin_init();
@@ -89,11 +142,16 @@ void bg96_init(void)
     // Set initial states
     bg96_reset_pin_set_low(); // Reset pin low
     bg96_pwrkey_pin_set_high(); // Power key pin high
+
+    modem_serial_open(module->serial, 115200); // Open the serial interface at 115200 baud
+    return 0;
 }
 
-void bg96_power_on(void)
+void bg96_power_on(Bg96* module)
 {
     bg96_pwrkey_pin_on(); // Set power key low to turn on
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for 1 second
     bg96_pwrkey_pin_off(); // Set power key high to complete power on
 }
+
+

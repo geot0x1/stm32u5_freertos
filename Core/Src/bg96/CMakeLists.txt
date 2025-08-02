@@ -5,6 +5,11 @@ target_sources(bg96
                bg96.c
                bg96.h)
 
+target_sources(bg96
+               PRIVATE
+               modem_serial.c
+               modem_serial.h)
+
 target_include_directories(bg96
                            PUBLIC
                            ${CMAKE_CURRENT_SOURCE_DIR})

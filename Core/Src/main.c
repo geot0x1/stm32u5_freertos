@@ -7,16 +7,21 @@
 #include "stm32u5xx_ll_usart.h"
 #include "task.h"
 #include "drv8825.h"
-
+#include "bg96.h"
+#include "fifo.h"
+#include "stm32u5xx_ll_lpuart.h"
 
 
 COM_InitTypeDef BspCOMInit;
-__IO uint32_t BspButtonState = BUTTON_RELEASED;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void SystemPower_Config(void);
 static void MX_ICACHE_Init(void);
+
+static void LPUART1_Init(int baudrate);
+static int lpuart_init(USART_TypeDef* instance, int baudrate);
+
 
 void vApplicationTickHook(void) { HAL_IncTick(); }
 
@@ -34,39 +39,227 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName)
     }
 }
 
+static uint8_t _fifo_buffer[512]; // Buffer for UART1
+static Fifo lpuart_fifo;
+uint8_t rx_byte;
+
+static modem_serial_lpuart_init(ModemSerial* self, int baudrate);
+static int modem_serial_lpuart_write(ModemSerial* self, const uint8_t* data, uint16_t len);
+static int modem_serial_lpuart_read(ModemSerial* self, uint8_t* data, uint16_t len);
 
 
-static Drv8825 motor = {
-    .step_port = GPIOB,
-    .step_pin = GPIO_PIN_10,
-    .dir_port = GPIOA,
-    .dir_pin = GPIO_PIN_8,
-    .enable_port = GPIOB,
-    .enable_pin = GPIO_PIN_4,
+static ModemSerial lpuart_serial =
+{
+    .context = LPUART1,
+    .open = modem_serial_lpuart_init,
+    .write = modem_serial_lpuart_write,
+    .read = modem_serial_lpuart_read
 };
+
+static Bg96 bg96_module =
+{
+    .serial = &lpuart_serial // Assign the serial interface to the BG96 module
+};
+
+static modem_serial_lpuart_init(ModemSerial* self, int baudrate)
+{
+    USART_TypeDef* instance = self->context;
+    fifo_init(&lpuart_fifo, _fifo_buffer, sizeof(_fifo_buffer));
+    lpuart_init(instance, baudrate);
+    return 0; // Success
+}
+
+static int modem_serial_lpuart_write(ModemSerial* self, const uint8_t* data, uint16_t len)
+{
+    USART_TypeDef* instance = self->context;
+    
+    for (uint16_t i = 0; i < len; ++i)
+    {
+        while (!LL_LPUART_IsActiveFlag_TXE(instance));
+        LL_LPUART_TransmitData8(instance, data[i]);
+    }
+
+    // Optional: wait for final transmission to complete
+    while (!LL_LPUART_IsActiveFlag_TC(instance)); // Wait for TC (Transmission Complete)
+    return len; // Return number of bytes written
+}
+
+static int modem_serial_lpuart_read(ModemSerial* self, uint8_t* data, uint16_t len)
+{
+    USART_TypeDef* instance = self->context;
+    uint16_t bytes_read = 0;
+
+    while (bytes_read < len)
+    {
+        if (fifo_is_empty(&lpuart_fifo))
+        {
+            break; // Exit if no more data in FIFO
+        }
+
+        uint8_t newbyte;
+        LL_LPUART_DisableIT_RXNE(LPUART1);
+        bool fifo_result = fifo_pop(&lpuart_fifo, &newbyte);
+        LL_LPUART_EnableIT_RXNE(LPUART1);
+        if (fifo_result)
+        {
+            data[bytes_read++] = newbyte;
+        }
+    }
+
+    return bytes_read; // Return number of bytes read
+}
+
+static int lpuart_init(USART_TypeDef* instance, int baudrate)
+{
+    LL_LPUART_InitTypeDef LPUART_InitStruct = {0};
+
+    LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
+    RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+
+    /** Initializes the peripherals clock
+     */
+    PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_LPUART1;
+    PeriphClkInit.Lpuart1ClockSelection = RCC_LPUART1CLKSOURCE_HSI;
+    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    /* Peripheral clock enable */
+    LL_APB3_GRP1_EnableClock(LL_APB3_GRP1_PERIPH_LPUART1);
+
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+    /**LPUART1 GPIO Configuration
+     PA2   ------> LPUART1_TX
+    PA3   ------> LPUART1_RX
+    */
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_2|LL_GPIO_PIN_3;
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_8;
+    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+
+    LL_LPUART_DeInit(LPUART1);
+    LPUART_InitStruct.PrescalerValue = LL_LPUART_PRESCALER_DIV1;
+    LPUART_InitStruct.BaudRate = baudrate;
+    LPUART_InitStruct.DataWidth = LL_LPUART_DATAWIDTH_8B;
+    LPUART_InitStruct.StopBits = LL_LPUART_STOPBITS_1;
+    LPUART_InitStruct.Parity = LL_LPUART_PARITY_NONE;
+    LPUART_InitStruct.TransferDirection = LL_LPUART_DIRECTION_TX_RX;
+    LPUART_InitStruct.HardwareFlowControl = LL_LPUART_HWCONTROL_NONE;
+    LL_LPUART_Init(LPUART1, &LPUART_InitStruct);
+    LL_LPUART_SetTXFIFOThreshold(LPUART1, LL_LPUART_FIFOTHRESHOLD_1_8);
+    LL_LPUART_SetRXFIFOThreshold(LPUART1, LL_LPUART_FIFOTHRESHOLD_1_8);
+    LL_LPUART_DisableFIFO(LPUART1);
+    LL_LPUART_Enable(LPUART1);
+
+    LL_LPUART_EnableIT_RXNE(LPUART1);
+    NVIC_SetPriority(LPUART1_IRQn, 6);
+    NVIC_EnableIRQ(LPUART1_IRQn);
+    LL_LPUART_Enable(LPUART1);
+    while (!LL_LPUART_IsActiveFlag_TEACK(LPUART1) || !LL_LPUART_IsActiveFlag_REACK(LPUART1)) {}
+
+    return 0; // Success
+}
+
+
+
+void LPUART1_IRQHandler(void)
+{
+    uint8_t receivedByte = 0;
+    if (LL_LPUART_IsActiveFlag_RXNE(LPUART1) && LL_LPUART_IsEnabledIT_RXNE(LPUART1))
+    {
+        receivedByte = LL_LPUART_ReceiveData8(LPUART1);
+        fifo_push(&lpuart_fifo, receivedByte);
+        // uart1_send_char_blocking(receivedByte); // Echo back the received byte
+    }
+    if (LL_LPUART_IsActiveFlag_ORE(LPUART1))
+    {
+        LL_LPUART_ClearFlag_ORE(LPUART1); // Clear overrun error
+    }
+    if (LL_LPUART_IsActiveFlag_FE(LPUART1))
+    {
+        LL_LPUART_ClearFlag_FE(LPUART1); // Clear framing error
+    }
+    if (LL_LPUART_IsActiveFlag_NE(LPUART1))
+    {
+        LL_LPUART_ClearFlag_NE(LPUART1); // Clear noise error
+    }
+}
+
+char* read_string(void)
+{
+    static char respbuffer[64];
+    uint16_t index = 0;
+   
+    // memset(respbuffer, 0, sizeof(respbuffer));
+    uint32_t timeout = 300;
+    uint8_t newbyte;
+    while (fifo_is_empty(&lpuart_fifo) == false && timeout-- > 0)
+    {
+        LL_LPUART_DisableIT_RXNE(LPUART1);
+        bool fifo_result = fifo_pop(&lpuart_fifo, &newbyte);
+        LL_LPUART_EnableIT_RXNE(LPUART1);
+        if (fifo_result)
+        {
+            if (index >= 62)
+            {
+                break;
+            }
+            respbuffer[index++] = newbyte;
+            respbuffer[index] = 0;
+        }
+        else
+        {
+        }
+            timeout--;
+            vTaskDelay(pdMS_TO_TICKS(1)); // Small delay to allow other tasks to run
+    }
+    return respbuffer;
+}
+
 
 static void test_task(void* args)
 {
     printf("Test task started\n\r");
 
+    bg96_init(&bg96_module);
+    bg96_power_on(&bg96_module);
 
-    motor_init(&motor);
-    motor_enable(&motor);
+    vTaskDelay(pdMS_TO_TICKS(3500)); // Wait for BG96 to power on
 
-    uint32_t step_count = 0;
-    int diretion = 0;
-    
+
+    const char* at = "AT\r";
+    const char* at_br = "AT+IPR=230400\r";
+
+    for (int i = 0; i < 3; i++)
+    {
+        modem_serial_write(&lpuart_serial, (const uint8_t*)at, strlen(at));
+        vTaskDelay(pdMS_TO_TICKS(500)); // Wait for response
+    }
+
+    modem_serial_write(&lpuart_serial, "AT+CPIN?\r", 9);
+
+
+
     while (1)
     {
         BSP_LED_Toggle(LED_GREEN);
 
-        motor_enable(&motor);
-        motor_steps(&motor, 200); // Adjust the number of steps as needed
-        motor_disable(&motor);
+        printf("Sending AT command: \r\n");
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        // motor_direction_set(diretion); // Set direction to one way
-        // diretion = !diretion; // Toggle direction
+        modem_serial_write(&lpuart_serial, "AT+CREG?\r", 9);
+        vTaskDelay(pdMS_TO_TICKS(200)); // Wait for response
+        while (fifo_is_empty(&lpuart_fifo) == false)
+        {
+            uint8_t newbyte = 0;
+            fifo_pop(&lpuart_fifo, &newbyte);
+            uart1_send_char_blocking(newbyte); // Echo back the received byte
+            vTaskDelay(1);
+        }
 
     }
 }
@@ -77,9 +270,9 @@ void uart1_send_char_blocking(char c)
     {
     }
     USART1->TDR = c;
-    while (!(USART1->ISR & USART_ISR_TC))
-    {
-    }
+    // while (!(USART1->ISR & USART_ISR_TC))
+    // {
+    // }
 }
 
 void uart_send_blocking(const char* s)
@@ -120,44 +313,7 @@ void uart1_init(void)
     }
 }
 
-void set_PB4_high(void)
-{
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET);
-}
 
-void set_PB4_low(void)
-{
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
-}
-
-void configure_PB10_output(void)
-{
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-
-    // 2. Configure PB10 (D6) as output push-pull
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_10;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-}
-
-void configure_PB4_output(void)
-{
-    // 1. Enable the GPIOB peripheral clock
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-
-    // 2. Configure PB4 as output push-pull
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_4;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
-}
 
 
 int main(void)
@@ -180,9 +336,7 @@ int main(void)
 
     // bg96_init();
 
-    /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity
-     */
-    BspCOMInit.BaudRate = 115200;
+    BspCOMInit.BaudRate = 230400;
     BspCOMInit.WordLength = COM_WORDLENGTH_8B;
     BspCOMInit.StopBits = COM_STOPBITS_1;
     BspCOMInit.Parity = COM_PARITY_NONE;
@@ -196,7 +350,7 @@ int main(void)
 
     BSP_LED_On(LED_GREEN);
 
-    xTaskCreate(test_task, "TestTask", 256, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(test_task, "TestTask", 1024, NULL, tskIDLE_PRIORITY, NULL);
 
     /* Start the scheduler */
     vTaskStartScheduler();
@@ -212,41 +366,45 @@ int main(void)
  */
 void SystemClock_Config(void)
 {
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-    /** Configure the main internal regulator output voltage
-     */
-    if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE4) != HAL_OK)
-    {
-        Error_Handler();
-    }
+  /** Configure the main internal regulator output voltage
+  */
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE4) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-    /** Initializes the CPU, AHB and APB buses clocks
-     */
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
-    RCC_OscInitStruct.MSIState = RCC_MSI_ON;
-    RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_4;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-    {
-        Error_Handler();
-    }
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+  RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_4;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-    /** Initializes the CPU, AHB and APB buses clocks
-     */
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_PCLK3;
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
-    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-    RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_PCLK3;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
 
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
-    {
-        Error_Handler();
-    }
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /**
@@ -280,19 +438,6 @@ static void MX_ICACHE_Init(void)
     }
 }
 
-/**
- * @brief BSP Push Button callback
- * @param Button Specifies the pressed button
- * @retval None
- */
-void BSP_PB_Callback(Button_TypeDef Button)
-{
-    printf("Button pressed: %d\n\r", Button);
-    if (Button == BUTTON_USER)
-    {
-        BspButtonState = BUTTON_PRESSED;
-    }
-}
 
 /**
  * @brief  This function is executed in case of error occurrence.
