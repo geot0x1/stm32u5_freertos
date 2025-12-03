@@ -10,6 +10,7 @@
 #include "bg96.h"
 #include "fifo.h"
 #include "stm32u5xx_ll_lpuart.h"
+#include <string.h>
 
 
 COM_InitTypeDef BspCOMInit;
@@ -43,7 +44,7 @@ static uint8_t _fifo_buffer[512]; // Buffer for UART1
 static Fifo lpuart_fifo;
 uint8_t rx_byte;
 
-static modem_serial_lpuart_init(ModemSerial* self, int baudrate);
+static int modem_serial_lpuart_init(ModemSerial* self, int baudrate);
 static int modem_serial_lpuart_write(ModemSerial* self, const uint8_t* data, uint16_t len);
 static int modem_serial_lpuart_read(ModemSerial* self, uint8_t* data, uint16_t len);
 
@@ -61,7 +62,7 @@ static Bg96 bg96_module =
     .serial = &lpuart_serial // Assign the serial interface to the BG96 module
 };
 
-static modem_serial_lpuart_init(ModemSerial* self, int baudrate)
+static int modem_serial_lpuart_init(ModemSerial* self, int baudrate)
 {
     USART_TypeDef* instance = self->context;
     fifo_init(&lpuart_fifo, _fifo_buffer, sizeof(_fifo_buffer));
@@ -190,6 +191,17 @@ void LPUART1_IRQHandler(void)
     }
 }
 
+void uart1_send_char_blocking(char c)
+{
+    while (!(USART1->ISR & USART_ISR_TXE))
+    {
+    }
+    USART1->TDR = c;
+    // while (!(USART1->ISR & USART_ISR_TC))
+    // {
+    // }
+}
+
 char* read_string(void)
 {
     static char respbuffer[64];
@@ -264,16 +276,7 @@ static void test_task(void* args)
     }
 }
 
-void uart1_send_char_blocking(char c)
-{
-    while (!(USART1->ISR & USART_ISR_TXE))
-    {
-    }
-    USART1->TDR = c;
-    // while (!(USART1->ISR & USART_ISR_TC))
-    // {
-    // }
-}
+
 
 void uart_send_blocking(const char* s)
 {
@@ -371,20 +374,27 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE4) != HAL_OK)
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_MSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_4;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_0;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+  RCC_OscInitStruct.PLL.PLLMBOOST = RCC_PLLMBOOST_DIV4;
+  RCC_OscInitStruct.PLL.PLLM = 3;
+  RCC_OscInitStruct.PLL.PLLN = 10;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 1;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLLVCIRANGE_1;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -395,13 +405,13 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_PCLK3;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
   {
     Error_Handler();
   }
