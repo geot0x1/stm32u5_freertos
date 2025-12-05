@@ -8,21 +8,21 @@ extern "C" {
 
 #include "modem_serial.h"
 
-struct CellularStream;
+struct GsmStream;
 
 typedef struct
 {
-    int (*open)(struct CellularStream* self, int baudrate);
-    int (*write)(struct CellularStream* self, const uint8_t* data, uint16_t len);
-    int (*read)(struct CellularStream* self, uint8_t* data, uint16_t len);
-    int (*close)(struct CellularStream* self);
-}CellularStreamVtable;
+    int (*open)(struct GsmStream* self, int baudrate);
+    int (*write)(struct GsmStream* self, const uint8_t* data, uint16_t len);
+    int (*read)(struct GsmStream* self, uint8_t* data, uint16_t len);
+    int (*close)(struct GsmStream* self);
+}GsmStreamVtable;
 
-typedef struct CellularStream
+typedef struct GsmStream
 {
     void* context;
-    CellularStreamVtable* vtable;
-}CellularStream;
+    GsmStreamVtable* vtable;
+}GsmStream;
 
 
 
@@ -33,7 +33,7 @@ typedef struct
 
     struct
     {
-        CellularStream* s;
+        GsmStream* s;
         uint8_t size;
     }streams;
     
@@ -43,6 +43,7 @@ typedef struct
 
 int bg96_init(Bg96* module);
 void bg96_power_on(Bg96* module);
+
 
 
 #ifdef __cplusplus

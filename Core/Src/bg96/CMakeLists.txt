@@ -3,7 +3,9 @@ add_library(bg96 STATIC)
 target_sources(bg96
                PRIVATE
                bg96.c
-               bg96.h)
+               bg96.h
+               gsm_hal.c
+               gsm_hal.h)
 
 target_sources(bg96
                PRIVATE

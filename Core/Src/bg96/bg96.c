@@ -5,6 +5,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include <string.h>
 
 
 
@@ -17,48 +18,103 @@ typedef struct
 
 
 
-static int native_modem_serial_init(CellularStream* self, int baudrate)
+static int native_modem_serial_init(GsmStream* self, int baudrate)
 {
     ModemSerial* modem_serial = self->context;
     return modem_serial_open(modem_serial, baudrate);
 }
 
-static int native_modem_serial_write(CellularStream* self, const uint8_t* data, uint16_t len)
+static int native_modem_serial_write(GsmStream* self, const uint8_t* data, uint16_t len)
 {
     ModemSerial* modem_serial = self->context;
     return modem_serial_write(modem_serial, data, len);
 }
 
-static int native_modem_serial_read(CellularStream* self, uint8_t* data, uint16_t len)
+static int native_modem_serial_read(GsmStream* self, uint8_t* data, uint16_t len)
 {
     ModemSerial* modem_serial = self->context;
     return modem_serial_read(modem_serial, data, len);
 }
 
-static int native_modem_serial_close(CellularStream* self)
+static int native_modem_serial_close(GsmStream* self)
 {
     // If there's no close function, we can just return 0
     return 0;
 }
 
 
-CellularStreamVtable native_stream_vtable = {
+GsmStreamVtable native_stream_vtable = {
     .open = native_modem_serial_init,
     .write = native_modem_serial_write,
     .read = native_modem_serial_read,
     .close = native_modem_serial_close
 };
 
-CellularStream native_stream = {
+GsmStream native_stream = {
     .context = NULL,
     .vtable = &native_stream_vtable
 };
 
-void send_at_command(CellularStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
-{
+// void send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
+// {
 
-}
+//     if (!stream || !stream->vtable || !stream->vtable->write || !stream->vtable->read || !handler || !command)
+//     {
+//         return;
+//     }
 
+//     // Clear handler
+//     handler->length = 0;
+//     handler->response[0] = '\0';
+
+//     // Ensure command ends with CR
+//     char cmdbuf[256];
+//     size_t cmdlen = strlen(command);
+//     if (cmdlen + 2 >= sizeof(cmdbuf))
+//     {
+//         return; // command too long
+//     }
+//     strcpy(cmdbuf, command);
+//     if (cmdlen == 0 || cmdbuf[cmdlen - 1] != '\r')
+//     {
+//         cmdbuf[cmdlen++] = '\r';
+//         cmdbuf[cmdlen] = '\0';
+//     }
+
+//     // Send the command
+//     stream->vtable->write(stream, (const uint8_t*)cmdbuf, (uint16_t)cmdlen);
+
+//     // Read loop: poll for response until timeout (timeout in ms)
+//     TickType_t start = xTaskGetTickCount();
+//     TickType_t timeout_ticks = pdMS_TO_TICKS(timeout);
+
+//     while ((xTaskGetTickCount() - start) < timeout_ticks)
+//     {
+//         uint8_t ch;
+//         int n = stream->vtable->read(stream, &ch, 1);
+//         if (n > 0)
+//         {
+//             if (handler->length < sizeof(handler->response) - 1)
+//             {
+//                 handler->response[handler->length++] = (char)ch;
+//                 handler->response[handler->length] = '\0';
+//             }
+
+//             // Simple terminal checks for final response
+//             if (strstr(handler->response, "\r\nOK\r\n") || strstr(handler->response, "\r\nERROR\r\n"))
+//             {
+//                 return;
+//             }
+//         }
+//         else
+//         {
+//             // No data available — small delay
+//             vTaskDelay(pdMS_TO_TICKS(10));
+//         }
+//     }
+
+//     // Timeout — just return with whatever we have
+// }
 
 void bg96_reset_pin_init(void)
 {
@@ -143,15 +199,51 @@ int bg96_init(Bg96* module)
     bg96_reset_pin_set_low(); // Reset pin low
     bg96_pwrkey_pin_set_high(); // Power key pin high
 
-    modem_serial_open(module->serial, 115200); // Open the serial interface at 115200 baud
-    return 0;
+    if (!module || !module->serial)
+    {
+        return -1;
+    }
+
+    // Hook up the native stream to the modem serial
+    native_stream.context = module->serial;
+    module->streams.s = &native_stream;
+
+    int r = modem_serial_open(module->serial, 115200); // Open the serial interface at 115200 baud
+    return r;
 }
 
 void bg96_power_on(Bg96* module)
 {
-    bg96_pwrkey_pin_on(); // Set power key low to turn on
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for 1 second
-    bg96_pwrkey_pin_off(); // Set power key high to complete power on
+    // bg96_pwrkey_pin_on(); // Toggle power key (board-specific polarity)
+    // vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for 1 second
+    // bg96_pwrkey_pin_off(); // Set power key high to complete power on
 }
+
+
+// int bg96_send_at(Bg96* module, const char* command, char* resp_buf, size_t buf_len, uint32_t timeout_ms)
+// {
+//     if (!module || !module->streams.s)
+//     {
+//         return -1;
+//     }
+
+//     AtHandler handler;
+//     handler.length = 0;
+//     memset(handler.response, 0, sizeof(handler.response));
+
+//     send_at_command(module->streams.s, command, &handler, timeout_ms);
+
+//     if (resp_buf && buf_len)
+//     {
+//         size_t copy_len = handler.length < (buf_len - 1) ? handler.length : (buf_len - 1);
+//         if (copy_len > 0)
+//         {
+//             memcpy(resp_buf, handler.response, copy_len);
+//         }
+//         resp_buf[copy_len] = '\0';
+//     }
+
+//     return (int)handler.length;
+// }
 
 
