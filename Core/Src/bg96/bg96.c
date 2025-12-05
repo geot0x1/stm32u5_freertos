@@ -5,6 +5,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "gsm_hal.h"
 #include <string.h>
 
 
@@ -133,15 +134,6 @@ void bg96_reset_pin_init(void)
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
-void bg96_reset_pin_set_high(void)
-{
-    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_4);
-}
-
-void bg96_reset_pin_set_low(void)
-{
-    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_4);
-}
 
 void bg96_pwrkey_pin_init(void)
 {
@@ -160,44 +152,34 @@ void bg96_pwrkey_pin_init(void)
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
-void bg96_pwrkey_pin_set_high(void)
-{
-    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_10);
-}
-
-void bg96_pwrkey_pin_set_low(void)
-{
-    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_10);
-}
 
 void bg96_reset_pin_on(void)
 {
-    bg96_reset_pin_set_high();
+    gsm_hal_reset_pin_set_high();
 }
 
 void bg96_reset_pin_off(void)
 {
-    bg96_reset_pin_set_low();
+    gsm_hal_reset_pin_set_low();
 }
 
 void bg96_pwrkey_pin_on(void)
 {
-    bg96_pwrkey_pin_set_high();
+    gsm_hal_pwrkey_pin_set_high();
 }
 
 void bg96_pwrkey_pin_off(void)
 {
-    bg96_pwrkey_pin_set_low();
+    gsm_hal_pwrkey_pin_set_low();
 }
 
 int bg96_init(Bg96* module)
 {
-    bg96_reset_pin_init();
-    bg96_pwrkey_pin_init();
+    gsm_hal_gpio_init();
 
     // Set initial states
-    bg96_reset_pin_set_low(); // Reset pin low
-    bg96_pwrkey_pin_set_high(); // Power key pin high
+    gsm_hal_reset_pin_set_low(); // Reset pin low
+    gsm_hal_pwrkey_pin_set_high(); // Power key pin high
 
     if (!module || !module->serial)
     {
@@ -214,9 +196,9 @@ int bg96_init(Bg96* module)
 
 void bg96_power_on(Bg96* module)
 {
-    // bg96_pwrkey_pin_on(); // Toggle power key (board-specific polarity)
-    // vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for 1 second
-    // bg96_pwrkey_pin_off(); // Set power key high to complete power on
+    bg96_pwrkey_pin_on(); // Toggle power key (board-specific polarity)
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for 1 second
+    bg96_pwrkey_pin_off(); // Set power key high to complete power on
 }
 
 

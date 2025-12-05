@@ -238,22 +238,22 @@ static void test_task(void* args)
 {
     printf("Test task started\n\r");
 
-    bg96_init(&bg96_module);
-    bg96_power_on(&bg96_module);
+    // bg96_init(&bg96_module);
+    // bg96_power_on(&bg96_module);
 
     vTaskDelay(pdMS_TO_TICKS(3500)); // Wait for BG96 to power on
 
 
-    const char* at = "AT\r";
-    const char* at_br = "AT+IPR=230400\r";
+    // const char* at = "AT\r";
+    // const char* at_br = "AT+IPR=230400\r";
 
-    for (int i = 0; i < 3; i++)
-    {
-        modem_serial_write(&lpuart_serial, (const uint8_t*)at, strlen(at));
-        vTaskDelay(pdMS_TO_TICKS(500)); // Wait for response
-    }
+    // for (int i = 0; i < 3; i++)
+    // {
+    //     modem_serial_write(&lpuart_serial, (const uint8_t*)at, strlen(at));
+    //     vTaskDelay(pdMS_TO_TICKS(500)); // Wait for response
+    // }
 
-    modem_serial_write(&lpuart_serial, "AT+CPIN?\r", 9);
+    // modem_serial_write(&lpuart_serial, "AT+CPIN?\r", 9);
 
 
 
@@ -263,15 +263,15 @@ static void test_task(void* args)
 
         printf("Sending AT command: \r\n");
 
-        modem_serial_write(&lpuart_serial, "AT+CREG?\r", 9);
-        vTaskDelay(pdMS_TO_TICKS(200)); // Wait for response
-        while (fifo_is_empty(&lpuart_fifo) == false)
-        {
-            uint8_t newbyte = 0;
-            fifo_pop(&lpuart_fifo, &newbyte);
-            uart1_send_char_blocking(newbyte); // Echo back the received byte
-            vTaskDelay(1);
-        }
+        // modem_serial_write(&lpuart_serial, "AT+CREG?\r", 9);
+        // vTaskDelay(pdMS_TO_TICKS(200)); // Wait for response
+        // while (fifo_is_empty(&lpuart_fifo) == false)
+        // {
+        //     uint8_t newbyte = 0;
+        //     fifo_pop(&lpuart_fifo, &newbyte);
+        //     uart1_send_char_blocking(newbyte); // Echo back the received byte
+        //     vTaskDelay(1);
+        // }
 
     }
 }
@@ -349,7 +349,7 @@ int main(void)
     }
     // uart1_init();
 
-    uart_send_blocking("Board restarted\n\r");
+    // uart_send_blocking("Board restarted\n\r");
 
     BSP_LED_On(LED_GREEN);
 
