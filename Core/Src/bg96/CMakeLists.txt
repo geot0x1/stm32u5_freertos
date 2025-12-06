@@ -17,3 +17,4 @@ target_include_directories(bg96
                            ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(bg96 PRIVATE STM32_Drivers stm32cubemx freertos_kernel)
+target_link_libraries(bg96 PRIVATE fifo)

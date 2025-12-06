@@ -43,6 +43,7 @@ typedef struct
 
 int bg96_init(Bg96* module);
 void bg96_power_on(Bg96* module);
+int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms);
 
 
 

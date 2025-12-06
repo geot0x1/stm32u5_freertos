@@ -20,8 +20,6 @@ void SystemClock_Config(void);
 static void SystemPower_Config(void);
 static void MX_ICACHE_Init(void);
 
-static void LPUART1_Init(int baudrate);
-static int lpuart_init(USART_TypeDef* instance, int baudrate);
 
 
 void vApplicationTickHook(void) { HAL_IncTick(); }
@@ -40,156 +38,11 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName)
     }
 }
 
-static uint8_t _fifo_buffer[512]; // Buffer for UART1
-static Fifo lpuart_fifo;
-uint8_t rx_byte;
-
-static int modem_serial_lpuart_init(ModemSerial* self, int baudrate);
-static int modem_serial_lpuart_write(ModemSerial* self, const uint8_t* data, uint16_t len);
-static int modem_serial_lpuart_read(ModemSerial* self, uint8_t* data, uint16_t len);
-
-
-static ModemSerial lpuart_serial =
-{
-    .context = LPUART1,
-    .open = modem_serial_lpuart_init,
-    .write = modem_serial_lpuart_write,
-    .read = modem_serial_lpuart_read
-};
 
 static Bg96 bg96_module =
 {
-    .serial = &lpuart_serial // Assign the serial interface to the BG96 module
 };
 
-static int modem_serial_lpuart_init(ModemSerial* self, int baudrate)
-{
-    USART_TypeDef* instance = self->context;
-    fifo_init(&lpuart_fifo, _fifo_buffer, sizeof(_fifo_buffer));
-    lpuart_init(instance, baudrate);
-    return 0; // Success
-}
-
-static int modem_serial_lpuart_write(ModemSerial* self, const uint8_t* data, uint16_t len)
-{
-    USART_TypeDef* instance = self->context;
-    
-    for (uint16_t i = 0; i < len; ++i)
-    {
-        while (!LL_LPUART_IsActiveFlag_TXE(instance));
-        LL_LPUART_TransmitData8(instance, data[i]);
-    }
-
-    // Optional: wait for final transmission to complete
-    while (!LL_LPUART_IsActiveFlag_TC(instance)); // Wait for TC (Transmission Complete)
-    return len; // Return number of bytes written
-}
-
-static int modem_serial_lpuart_read(ModemSerial* self, uint8_t* data, uint16_t len)
-{
-    USART_TypeDef* instance = self->context;
-    uint16_t bytes_read = 0;
-
-    while (bytes_read < len)
-    {
-        if (fifo_is_empty(&lpuart_fifo))
-        {
-            break; // Exit if no more data in FIFO
-        }
-
-        uint8_t newbyte;
-        LL_LPUART_DisableIT_RXNE(LPUART1);
-        bool fifo_result = fifo_pop(&lpuart_fifo, &newbyte);
-        LL_LPUART_EnableIT_RXNE(LPUART1);
-        if (fifo_result)
-        {
-            data[bytes_read++] = newbyte;
-        }
-    }
-
-    return bytes_read; // Return number of bytes read
-}
-
-static int lpuart_init(USART_TypeDef* instance, int baudrate)
-{
-    LL_LPUART_InitTypeDef LPUART_InitStruct = {0};
-
-    LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
-    RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
-
-    /** Initializes the peripherals clock
-     */
-    PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_LPUART1;
-    PeriphClkInit.Lpuart1ClockSelection = RCC_LPUART1CLKSOURCE_HSI;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    /* Peripheral clock enable */
-    LL_APB3_GRP1_EnableClock(LL_APB3_GRP1_PERIPH_LPUART1);
-
-    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
-    /**LPUART1 GPIO Configuration
-     PA2   ------> LPUART1_TX
-    PA3   ------> LPUART1_RX
-    */
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_2|LL_GPIO_PIN_3;
-    GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
-    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_HIGH;
-    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-    GPIO_InitStruct.Alternate = LL_GPIO_AF_8;
-    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-
-    LL_LPUART_DeInit(LPUART1);
-    LPUART_InitStruct.PrescalerValue = LL_LPUART_PRESCALER_DIV1;
-    LPUART_InitStruct.BaudRate = baudrate;
-    LPUART_InitStruct.DataWidth = LL_LPUART_DATAWIDTH_8B;
-    LPUART_InitStruct.StopBits = LL_LPUART_STOPBITS_1;
-    LPUART_InitStruct.Parity = LL_LPUART_PARITY_NONE;
-    LPUART_InitStruct.TransferDirection = LL_LPUART_DIRECTION_TX_RX;
-    LPUART_InitStruct.HardwareFlowControl = LL_LPUART_HWCONTROL_NONE;
-    LL_LPUART_Init(LPUART1, &LPUART_InitStruct);
-    LL_LPUART_SetTXFIFOThreshold(LPUART1, LL_LPUART_FIFOTHRESHOLD_1_8);
-    LL_LPUART_SetRXFIFOThreshold(LPUART1, LL_LPUART_FIFOTHRESHOLD_1_8);
-    LL_LPUART_DisableFIFO(LPUART1);
-    LL_LPUART_Enable(LPUART1);
-
-    LL_LPUART_EnableIT_RXNE(LPUART1);
-    NVIC_SetPriority(LPUART1_IRQn, 6);
-    NVIC_EnableIRQ(LPUART1_IRQn);
-    LL_LPUART_Enable(LPUART1);
-    while (!LL_LPUART_IsActiveFlag_TEACK(LPUART1) || !LL_LPUART_IsActiveFlag_REACK(LPUART1)) {}
-
-    return 0; // Success
-}
-
-
-
-void LPUART1_IRQHandler(void)
-{
-    uint8_t receivedByte = 0;
-    if (LL_LPUART_IsActiveFlag_RXNE(LPUART1) && LL_LPUART_IsEnabledIT_RXNE(LPUART1))
-    {
-        receivedByte = LL_LPUART_ReceiveData8(LPUART1);
-        fifo_push(&lpuart_fifo, receivedByte);
-        // uart1_send_char_blocking(receivedByte); // Echo back the received byte
-    }
-    if (LL_LPUART_IsActiveFlag_ORE(LPUART1))
-    {
-        LL_LPUART_ClearFlag_ORE(LPUART1); // Clear overrun error
-    }
-    if (LL_LPUART_IsActiveFlag_FE(LPUART1))
-    {
-        LL_LPUART_ClearFlag_FE(LPUART1); // Clear framing error
-    }
-    if (LL_LPUART_IsActiveFlag_NE(LPUART1))
-    {
-        LL_LPUART_ClearFlag_NE(LPUART1); // Clear noise error
-    }
-}
 
 void uart1_send_char_blocking(char c)
 {
@@ -202,44 +55,15 @@ void uart1_send_char_blocking(char c)
     // }
 }
 
-char* read_string(void)
-{
-    static char respbuffer[64];
-    uint16_t index = 0;
-   
-    // memset(respbuffer, 0, sizeof(respbuffer));
-    uint32_t timeout = 300;
-    uint8_t newbyte;
-    while (fifo_is_empty(&lpuart_fifo) == false && timeout-- > 0)
-    {
-        LL_LPUART_DisableIT_RXNE(LPUART1);
-        bool fifo_result = fifo_pop(&lpuart_fifo, &newbyte);
-        LL_LPUART_EnableIT_RXNE(LPUART1);
-        if (fifo_result)
-        {
-            if (index >= 62)
-            {
-                break;
-            }
-            respbuffer[index++] = newbyte;
-            respbuffer[index] = 0;
-        }
-        else
-        {
-        }
-            timeout--;
-            vTaskDelay(pdMS_TO_TICKS(1)); // Small delay to allow other tasks to run
-    }
-    return respbuffer;
-}
+
 
 
 static void test_task(void* args)
 {
     printf("Test task started\n\r");
 
-    // bg96_init(&bg96_module);
-    // bg96_power_on(&bg96_module);
+    bg96_init(&bg96_module);
+    bg96_power_on(&bg96_module);
 
     vTaskDelay(pdMS_TO_TICKS(3500)); // Wait for BG96 to power on
 
@@ -262,6 +86,8 @@ static void test_task(void* args)
         BSP_LED_Toggle(LED_GREEN);
 
         printf("Sending AT command: \r\n");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        bg96_send_at(&bg96_module, "AT\r", 2000);
 
         // modem_serial_write(&lpuart_serial, "AT+CREG?\r", 9);
         // vTaskDelay(pdMS_TO_TICKS(200)); // Wait for response
@@ -273,6 +99,16 @@ static void test_task(void* args)
         //     vTaskDelay(1);
         // }
 
+    }
+}
+
+static void background_task(void* args)
+{
+    while (1)
+    {
+        printf("tick\r\n");
+        // Background processing can be done here
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Sleep for 1 second
     }
 }
 
@@ -354,6 +190,7 @@ int main(void)
     BSP_LED_On(LED_GREEN);
 
     xTaskCreate(test_task, "TestTask", 1024, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(background_task, "BackgroundTask", 512, NULL, tskIDLE_PRIORITY + 1, NULL);
 
     /* Start the scheduler */
     vTaskStartScheduler();

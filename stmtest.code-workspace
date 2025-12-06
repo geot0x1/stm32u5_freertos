@@ -41,7 +41,8 @@
         "stm32u5xx_ll_gpio.h": "c",
         "stm32u5xx.h": "c",
         "stm32u5xx_nucleo_conf.h": "c",
-        "stm32u5xx_ll_lpuart.h": "c"
+        "stm32u5xx_ll_lpuart.h": "c",
+        "main.h": "c"
     }
     }
 }

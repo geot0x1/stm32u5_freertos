@@ -7,6 +7,8 @@
 #include "task.h"
 #include "gsm_hal.h"
 #include <string.h>
+#include <stdbool.h>
+#include <stdio.h>
 
 
 
@@ -14,6 +16,8 @@ typedef struct
 {
     char response[256];
     size_t length;
+    void* context;
+    void (*response_handler)(void* ctx, const char* response, size_t length);
 } AtHandler;
 
 
@@ -21,20 +25,17 @@ typedef struct
 
 static int native_modem_serial_init(GsmStream* self, int baudrate)
 {
-    ModemSerial* modem_serial = self->context;
-    return modem_serial_open(modem_serial, baudrate);
+    return gsm_hal_serial_init(baudrate);
 }
 
 static int native_modem_serial_write(GsmStream* self, const uint8_t* data, uint16_t len)
 {
-    ModemSerial* modem_serial = self->context;
-    return modem_serial_write(modem_serial, data, len);
+    return gsm_hal_serial_write(data, len);
 }
 
 static int native_modem_serial_read(GsmStream* self, uint8_t* data, uint16_t len)
 {
-    ModemSerial* modem_serial = self->context;
-    return modem_serial_read(modem_serial, data, len);
+    return gsm_hal_serial_read(data, len);
 }
 
 static int native_modem_serial_close(GsmStream* self)
@@ -55,6 +56,97 @@ GsmStream native_stream = {
     .context = NULL,
     .vtable = &native_stream_vtable
 };
+
+static void at_handler_clear(AtHandler* handler)
+{
+    handler->length = 0;
+    handler->response[0] = '\0';
+}
+
+static int at_handler_append_char(AtHandler* handler, char c)
+{
+    if (handler->length < sizeof(handler->response) - 1)
+    {
+        handler->response[handler->length++] = c;
+        handler->response[handler->length] = '\0'; // Null-terminate
+        return 0;
+    }
+    return -1; // Buffer full
+}
+
+int send_at_command_prv(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
+{
+    if (!stream || !stream->vtable || !stream->vtable->write || !stream->vtable->read || !handler || !command)
+    {
+        return -1;
+    }
+
+    at_handler_clear(handler);
+    // Send the command
+    printf("Sending: %s", command);
+    stream->vtable->write(stream, (const uint8_t*)command, (uint16_t)strlen(command));
+
+    // Read loop: poll for response until timeout (timeout in ms)
+    uint32_t start = HAL_GetTick();
+
+    while ((HAL_GetTick() - start) < timeout)
+    {
+        uint8_t ch;
+        int n = stream->vtable->read(stream, &ch, 1);
+        if (n > 0)
+        {
+            if (at_handler_append_char(handler, (char)ch) < 0)
+            {
+                at_handler_clear(handler);
+            }
+            if (handler->length >= 2 && 
+                handler->response[handler->length - 2] == '\r' &&
+                handler->response[handler->length - 1] == '\n')
+            {
+                printf("Response received: %s", handler->response);
+                if (handler->response_handler)
+                {
+                    handler->response_handler(handler->context, handler->response, handler->length);
+                }
+                at_handler_clear(handler);
+            }
+
+        }
+        else
+        {
+            // No data available — small delay
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    // Timeout — return with whatever we have
+    return (int)handler->length;
+}
+
+static void parse_simple_at(void* ctx, const char* response, size_t length)
+{
+    // Simple parser example: just print the response
+    printf("AT Response (%d bytes): %s\n", length, response);
+    if (strstr(response, "OK"))
+    {
+        printf("Command succeeded.\n");
+    }
+    else if (strstr(response, "ERROR"))
+    {
+        printf("Command failed.\n");
+    }
+}
+
+int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
+{
+    AtHandler handler;
+    handler.response_handler = parse_simple_at;
+    handler.context = NULL;
+    handler.length = 0;
+    memset(handler.response, 0, sizeof(handler.response));
+
+    return send_at_command_prv(&native_stream, command, &handler, timeout_ms);
+}
 
 // void send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
 // {
@@ -181,17 +273,8 @@ int bg96_init(Bg96* module)
     gsm_hal_reset_pin_set_low(); // Reset pin low
     gsm_hal_pwrkey_pin_set_high(); // Power key pin high
 
-    if (!module || !module->serial)
-    {
-        return -1;
-    }
-
-    // Hook up the native stream to the modem serial
-    native_stream.context = module->serial;
-    module->streams.s = &native_stream;
-
-    int r = modem_serial_open(module->serial, 115200); // Open the serial interface at 115200 baud
-    return r;
+    gsm_hal_serial_init(115200);
+    return 0;
 }
 
 void bg96_power_on(Bg96* module)
