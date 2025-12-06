@@ -17,7 +17,9 @@ typedef struct
     char response[256];
     size_t length;
     void* context;
-    void (*response_handler)(void* ctx, const char* response, size_t length);
+    // response_handler should return non-zero when it has fully processed the
+    // response and the caller should stop waiting for more data.
+    int (*response_handler)(void* ctx, const char* response, size_t length);
 } AtHandler;
 
 
@@ -106,9 +108,19 @@ int send_at_command_prv(GsmStream* stream, const char* command, AtHandler* handl
                 printf("Response received: %s", handler->response);
                 if (handler->response_handler)
                 {
-                    handler->response_handler(handler->context, handler->response, handler->length);
+                    size_t resp_len = handler->length;
+                    int handled = handler->response_handler(handler->context, handler->response, resp_len);
+                    at_handler_clear(handler);
+                    if (handled)
+                    {
+                        // Handler indicates message processed — exit read loop early
+                        return (int)resp_len;
+                    }
                 }
-                at_handler_clear(handler);
+                else
+                {
+                    at_handler_clear(handler);
+                }
             }
 
         }
@@ -123,18 +135,21 @@ int send_at_command_prv(GsmStream* stream, const char* command, AtHandler* handl
     return (int)handler->length;
 }
 
-static void parse_simple_at(void* ctx, const char* response, size_t length)
+static int parse_simple_at(void* ctx, const char* response, size_t length)
 {
     // Simple parser example: just print the response
-    printf("AT Response (%d bytes): %s\n", length, response);
+    printf("AT Response (%d bytes): %s\n", (int)length, response);
     if (strstr(response, "OK"))
     {
         printf("Command succeeded.\n");
+        return 1; // processed, caller can stop waiting
     }
     else if (strstr(response, "ERROR"))
     {
         printf("Command failed.\n");
+        return 1; // processed, caller can stop waiting
     }
+    return 0; // not a terminal response yet
 }
 
 int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
