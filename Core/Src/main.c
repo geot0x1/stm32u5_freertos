@@ -90,7 +90,12 @@ static void test_task(void* args)
         bg96_send_at(&bg96_module, "AT\r", 2000);
 
         vTaskDelay(pdMS_TO_TICKS(3000));
-        bg96_query_creg(&bg96_module);
+
+        int network_registration = bg96_get_network_registration(&bg96_module); 
+        printf("Network Registration Status: %d\r\n", network_registration);
+        
+        // Bg96CregStatus creg_status;
+        // bg96_query_creg(&bg96_module, &creg_status);
 
         // modem_serial_write(&lpuart_serial, "AT+CREG?\r", 9);
         // vTaskDelay(pdMS_TO_TICKS(200)); // Wait for response
