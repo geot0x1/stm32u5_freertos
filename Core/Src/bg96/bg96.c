@@ -76,7 +76,7 @@ static int at_handler_append_char(AtHandler* handler, char c)
     return -1; // Buffer full
 }
 
-int send_at_command_prv(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
+int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
 {
     if (!stream || !stream->vtable || !stream->vtable->write || !stream->vtable->read || !handler || !command)
     {
@@ -152,6 +152,74 @@ static int parse_simple_at(void* ctx, const char* response, size_t length)
     return 0; // not a terminal response yet
 }
 
+// Helper: trim leading spaces
+static const char* skip_spaces(const char* s)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+
+// Helper: copy a token from src (stops at comma or end) into dst, strip quotes
+static size_t copy_token(char* dst, size_t dst_len, const char* src)
+{
+    const char* p = src;
+    // skip leading spaces
+    while ((*p == ' ' || *p == '\t') && *p) p++;
+
+    // optional leading quote
+    if (*p == '"') p++;
+
+    size_t i = 0;
+    while (*p && *p != ',' && *p != '\r' && *p != '\n' && i + 1 < dst_len)
+    {
+        if (*p == '"') break; // end quote
+        dst[i++] = *p++;
+    }
+    dst[i] = '\0';
+    return i;
+}
+
+// Parse +CREG: lines. This handler follows the AtHandler response_handler signature.
+static int creg_response_handler(void* ctx, const char* response, size_t length)
+{
+    if (!ctx || !response) return 0;
+
+    Bg96CregStatus* st = (Bg96CregStatus*)ctx;
+    const char* prefix = "+CREG:";
+    if (strncmp(response, prefix, strlen(prefix)) == 0)
+    {
+        st->response_found = true;
+        // Further parsing can be done here if needed
+        return 0; // not fully processed yet
+    }
+    else if (strstr(response, "OK"))
+    {
+        st->ok_found = true;
+        return 1; // fully processed
+    }
+    return 0;
+}
+
+int bg96_query_creg(Bg96* module)
+{
+    AtHandler handler;
+    Bg96CregStatus creg_status = {0};
+    handler.response_handler = creg_response_handler;
+    handler.context = &creg_status;
+    handler.length = 0;
+    memset(handler.response, 0, sizeof(handler.response));
+
+    // send command; include CR
+    const char* cmd = "AT+CREG?\r";
+    int r = send_at_command(&native_stream, cmd, &handler, 3000);
+    if (r <= 0)
+    {
+        return -1; // timeout or no data
+    }
+    // success: status filled by handler
+    return 0;
+}
+
 int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
 {
     AtHandler handler;
@@ -160,8 +228,9 @@ int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
     handler.length = 0;
     memset(handler.response, 0, sizeof(handler.response));
 
-    return send_at_command_prv(&native_stream, command, &handler, timeout_ms);
+    return send_at_command(&native_stream, command, &handler, timeout_ms);
 }
+
 
 // void send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
 // {

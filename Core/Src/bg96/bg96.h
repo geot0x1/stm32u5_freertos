@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "modem_serial.h"
 
@@ -24,6 +25,12 @@ typedef struct GsmStream
     GsmStreamVtable* vtable;
 }GsmStream;
 
+// Result for AT+CREG?
+typedef struct
+{
+    bool response_found;
+    bool ok_found;
+} Bg96CregStatus;
 
 
 
@@ -44,6 +51,11 @@ typedef struct
 int bg96_init(Bg96* module);
 void bg96_power_on(Bg96* module);
 int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms);
+
+
+// Query network registration via AT+CREG?; returns 0 on success and fills
+// `status` (if non-NULL). Returns negative on error or timeout.
+int bg96_query_creg(Bg96* module);
 
 
 

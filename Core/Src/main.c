@@ -89,6 +89,9 @@ static void test_task(void* args)
         vTaskDelay(pdMS_TO_TICKS(500));
         bg96_send_at(&bg96_module, "AT\r", 2000);
 
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        bg96_query_creg(&bg96_module);
+
         // modem_serial_write(&lpuart_serial, "AT+CREG?\r", 9);
         // vTaskDelay(pdMS_TO_TICKS(200)); // Wait for response
         // while (fifo_is_empty(&lpuart_fifo) == false)
