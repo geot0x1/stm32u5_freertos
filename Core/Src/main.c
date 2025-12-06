@@ -91,8 +91,16 @@ static void test_task(void* args)
 
         vTaskDelay(pdMS_TO_TICKS(3000));
 
-        int network_registration = bg96_get_network_registration(&bg96_module); 
-        printf("Network Registration Status: %d\r\n", network_registration);
+        Bg96AtResult atres;
+        int ret = bg96_get_network_registration(&bg96_module, &atres, 2000);
+        if (ret == 0)
+        {
+            printf("BG96 Network Registration Status: %d\r\n", atres.detail.creg.n);
+        }
+        else
+        {
+            printf("Failed to get network registration, error: %d\r\n", ret);
+        }
         
         // Bg96CregStatus creg_status;
         // bg96_query_creg(&bg96_module, &creg_status);

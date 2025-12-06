@@ -9,6 +9,15 @@ extern "C" {
 
 #include "modem_serial.h"
 
+#define EINVAL    -1
+#define ETIMEDOUT -2
+#define EIO       -3
+#define ENODATA   -4
+
+#define AT_OK      0
+#define AT_WAITING 1
+
+
 struct GsmStream;
 
 typedef struct
@@ -75,7 +84,6 @@ typedef enum
 
 typedef struct
 {
-    Bg96AtStatus status;   // common status (success/fail/timeout)
     union
     {
         Bg96CregStatus creg; // result for AT+CREG?
@@ -92,7 +100,9 @@ Bg96AtStatus bg96_send_at_result(Bg96* module, const char* command, Bg96AtResult
 // Query network registration via AT+CREG?; fills `status` (must be provided).
 // Returns 0 on success, negative on error or timeout.
 int bg96_query_creg(Bg96* module, Bg96CregStatus* status);
-Bg96NetworkRegistrationStatus bg96_get_network_registration(Bg96* module);
+
+
+int bg96_get_network_registration(Bg96* module, Bg96AtResult* result, uint32_t timeout_ms);
 
 
 
