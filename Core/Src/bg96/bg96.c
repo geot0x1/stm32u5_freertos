@@ -27,6 +27,7 @@ typedef struct
 static void print_response(const char* response, size_t length);
 static bool is_ok(const char* response);
 static bool is_error(const char* response);
+static const char* skip_spaces(const char* s);
 static int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout);
 
 
@@ -144,15 +145,15 @@ static int send_at_command(GsmStream* stream, const char* command, AtHandler* ha
 
 static int parse_simple_at(void* ctx, const char* response, size_t length)
 {
-    if (strstr(response, "OK\r\n"))
+    if (is_ok(response))
     {
         printf("Command succeeded.\n");
         return AT_SUCCESS;
     }
-    else if (strstr(response, "ERROR\r\n"))
+    else if (is_error(response))
     {
         printf("Command failed.\n");
-        return AT_SUCCESS;
+        return AT_ERR_FAIL;
     }
     return AT_PENDING;
 }
@@ -174,13 +175,13 @@ static int creg_response_handler(void* ctx, const char* response, size_t length)
         st->n = net_status - '0'; // Convert char to int    
         return AT_PENDING;
     }
-    else if (strstr(response, "OK\r\n"))
+    else if (is_ok(response))
     {
         printf("Received OK response.\n");
         st->ok_found = true;
         return AT_SUCCESS;
     }
-    else if (strstr(response, "ERROR\r\n"))
+    else if (is_error(response))
     {
         return AT_ERR_FAIL;
     }
@@ -369,12 +370,14 @@ static void print_response(const char* response, size_t length)
 
 static bool is_ok(const char* response)
 {
-    return strstr(response, "OK\r\n") != NULL;
+    const char* s = skip_spaces(response);
+    return strncmp(s, "OK\r\n", 4) == 0;
 }
 
 static bool is_error(const char* response)
 {
-    return strstr(response, "ERROR\r\n") != NULL;
+    const char* s = skip_spaces(response);
+    return strncmp(s, "ERROR\r\n", 7) == 0;
 }
 
 // Helper: trim leading spaces
