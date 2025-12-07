@@ -298,6 +298,10 @@ int bg96_get_network_registration(Bg96* module, uint32_t timeout_ms)
         {
             return AT_SUCCESS;
         }
+        else
+        {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
     }
     return AT_ERR_TIMEOUT;
 }
