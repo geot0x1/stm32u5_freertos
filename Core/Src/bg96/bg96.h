@@ -52,6 +52,21 @@ typedef struct
     Bg96NetworkRegistrationStatus n; // network registration status
 } Bg96CregStatus;
 
+#define BG96_NETINFO_MAX_LEN 32
+
+typedef struct
+{
+    // Fields extracted from: +QNWINFO: "RAT","OP_NAME","BAND","CHANNEL"
+    char radio_access_tech[BG96_NETINFO_MAX_LEN]; // e.g., "CAT-NB1", "GSM"
+    char operator_name[BG96_NETINFO_MAX_LEN];     // e.g., "20201" (MCCMNC)
+    char band_name[BG96_NETINFO_MAX_LEN];         // e.g., "LTE BAND 20", "GSM 900"
+    int channel_number;                           // e.g., 6390 (parsed integer)
+    
+    // Status flags
+    bool response_found;
+    bool ok_found;
+} Bg96NetworkInfo;
+
 
 
 typedef struct
@@ -103,7 +118,9 @@ int bg96_query_creg(Bg96* module, Bg96CregStatus* status);
 
 
 int bg96_get_network_registration(Bg96* module, uint32_t timeout_ms);
+int bg96_initialize(Bg96* module);
 
+int bg96_set_iotopmode(Bg96* module);
 
 
 

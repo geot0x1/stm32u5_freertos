@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
-
+#include <stdlib.h> // Required for atoi
 
 
 typedef struct
@@ -29,6 +29,8 @@ static bool is_ok(const char* response);
 static bool is_error(const char* response);
 static const char* skip_spaces(const char* s);
 static int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout);
+static const char* get_string_until(const char* start, char delimiter, char* out_buf, size_t buf_size);
+static const char* get_integer_until(const char* start, char delimiter, int* out_val);
 
 
 
@@ -199,6 +201,47 @@ static int creg_response_handler(void* ctx, const char* response, size_t length)
     return AT_PENDING;
 }
 
+static int parse_qnwinfo(void* ctx, const char* response, size_t length)
+{
+    if (!ctx || !response) return 0;
+
+    Bg96NetworkInfo* info = (Bg96NetworkInfo*)ctx;
+    if (is_error(response))
+    {
+        return AT_ERR_FAIL;
+    }
+
+    if (info->response_found)
+    {
+        if (is_ok(response))
+        {
+            printf("Received OK response.\n");
+            info->ok_found = true;
+            return AT_SUCCESS;
+        }
+    }
+    else
+    {
+        const char* prefix = "+QNWINFO:";
+        if (strncmp(response, prefix, strlen(prefix)) == 0)
+        {
+            // Example response: +QNWINFO: "CAT-M","Operator","B2",1234
+            const char* ptr = response + strlen(prefix);
+            if (ptr)
+            {
+                ptr = get_string_until(ptr, ',', info->radio_access_tech, sizeof(info->radio_access_tech));
+                ptr = get_string_until(ptr, ',', info->operator_name, sizeof(info->operator_name));
+                ptr = get_string_until(ptr, ',', info->band_name, sizeof(info->band_name));
+                ptr = get_integer_until(ptr, '\r', &info->channel_number);
+                info->response_found = true;
+            }
+            return AT_PENDING;
+        }
+    }
+    
+    return AT_PENDING;
+}
+
 int bg96_disable_echo(Bg96* module)
 {
     AtHandler handler;
@@ -235,9 +278,46 @@ int bg96_send_simple_at(Bg96* module)
     return AT_ERR_FAIL;
 }
 
+int bg96_query_network_info(Bg96* module, Bg96NetworkInfo* info)
+{
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = parse_qnwinfo;
+    handler.context = info;
+    handler.command = "AT+QNWINFO\r";
+    for (int i = 0; i < 3; i++)
+    {
+        memset(info, 0, sizeof(Bg96NetworkInfo));
+        int ret = bg96_send_at_command(module, &handler, 2000);
+        if (ret == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
 
+// AT+QCFG="iotopmode",0,1
+int bg96_set_iotopmode(Bg96* module)
+{
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = parse_simple_at;
+    handler.context = NULL;
+    handler.command = "AT+QCFG=\"iotopmode\",1\r";
 
-int bg96_connect(Bg96* module)
+    for (int i = 0; i < 3; i++)
+    {
+        int ret = bg96_send_at_command(module, &handler, 2000);
+        if (ret == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
+
+int bg96_initialize(Bg96* module)
 {
     if (bg96_send_simple_at(module) != AT_SUCCESS)
     {
@@ -251,6 +331,44 @@ int bg96_connect(Bg96* module)
     {
         return AT_ERR_FAIL;
     }
+    Bg96NetworkInfo info;
+    if (bg96_query_network_info(module, &info) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+    return AT_SUCCESS;
+}
+
+// int bg96_
+
+int bg96_connect(Bg96* module)
+{
+    // if (bg96_send_simple_at(module) != AT_SUCCESS)
+    // {
+    //     return AT_ERR_FAIL;
+    // }
+    // if (bg96_disable_echo(module) != AT_SUCCESS)
+    // {
+    //     return AT_ERR_FAIL;
+    // }
+    if (bg96_get_network_registration(module, 10000) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+    Bg96NetworkInfo info;
+    if (bg96_query_network_info(module, &info) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+    printf("Connected to network: RAT=%s, OP_NAME=%s, BAND=%s, CHANNEL=%d\r\n",
+           info.radio_access_tech,
+           info.operator_name,
+           info.band_name,
+           info.channel_number);
+    // if (bg96_set_iotopmode(module) != AT_SUCCESS)
+    // {
+    //     return AT_ERR_FAIL;
+    // }
 
     return 0;
 }
@@ -396,4 +514,148 @@ static const char* skip_spaces(const char* s)
 {
     while (*s == ' ' || *s == '\t') s++;
     return s;
+}
+
+
+
+/**
+ * @brief Skips leading delimiters/garbage, copies characters until the next delimiter,
+ * and filters specified "garbage" characters during the copy.
+ *
+ * @param start The pointer to the beginning of the source string.
+ * @param delimiter The character that marks the end of the string segment (e.g., ',').
+ * @param out_buf The output buffer for the copied string.
+ * @param buf_size The maximum size of the output buffer.
+ * @return const char* Pointer to the character immediately following the stopping delimiter
+ * in the source string, or to the null terminator if reached.
+ */
+static const char* get_string_until(const char* start, char delimiter, char* out_buf, size_t buf_size)
+{
+    // --- Phase 1: Skip leading garbage and the initial delimiter ---
+
+    // Define the set of characters to treat as leading garbage
+    const char* garbage_chars = " \t/\\'\","; // Space, Tab, Slash, Backslash, Single-quote, Double-quote
+
+    // 1. Skip all leading 'garbage' characters
+    start = skip_spaces(start); // Use the existing skip_spaces helper (which includes tab/space)
+    
+    // 2. Skip the delimiter if it is the very first character (handles ",token")
+    if (*start == delimiter)
+    {
+        start++;
+    }
+    
+    // 3. Skip any remaining garbage characters after the delimiter
+    while (*start != '\0' && strchr(garbage_chars, *start) != NULL)
+    {
+        start++;
+    }
+    
+    // --- Phase 2: Copy until the next delimiter or buffer end ---
+    
+    size_t out_index = 0;
+    const char* read_ptr = start;
+
+    while (*read_ptr != '\0' && *read_ptr != delimiter && out_index < buf_size - 1)
+    {
+        // Define the set of characters to skip/filter during the copy
+        // We include CR/LF which terminate the line, but also your specified garbage.
+        const char* filter_chars = " \t/\\'\"\r\n"; 
+
+        // If the character is NOT in the filter set, copy it
+        if (strchr(filter_chars, *read_ptr) == NULL)
+        {
+            out_buf[out_index++] = *read_ptr;
+        }
+        else if (*read_ptr == '\r' || *read_ptr == '\n')
+        {
+             // If CR or LF is found, treat it as an immediate termination point.
+             break;
+        }
+        
+        read_ptr++;
+    }
+
+    out_buf[out_index] = '\0'; // Null-terminate the output string
+
+    // Return the pointer to where copying stopped in the source string
+    return read_ptr;
+}
+
+/**
+ * @brief Skips leading delimiters/garbage and extracts an integer value
+ * until the next delimiter, whitespace, or end-of-line is found.
+ *
+ * This function is non-destructive and safe for lightweight embedded parsing.
+ *
+ * @param start The pointer to the beginning of the source string.
+ * @param delimiter The character that marks the end of the integer segment (e.g., ',').
+ * @param out_val Pointer to the integer variable to store the extracted value.
+ * @return const char* Pointer to the character immediately following the stopping delimiter
+ * in the source string, or to the null terminator if reached.
+ */
+static const char* get_integer_until(const char* start, char delimiter, int* out_val)
+{
+    const char* read_ptr = start;
+    
+    // --- Phase 1: Skip leading garbage and the initial delimiter ---
+
+    // 1. Skip all leading whitespace
+    read_ptr = skip_spaces(read_ptr);
+    
+    // 2. Skip the delimiter if it is the very first non-space character (e.g., skips the comma in ",123")
+    if (*read_ptr == delimiter)
+    {
+        read_ptr++;
+    }
+    
+    // 3. Skip any remaining non-numeric, non-terminating garbage (like quotes/slashes)
+    const char* non_numeric_garbage = "/\\'\","; 
+    while (*read_ptr != '\0' && strchr(non_numeric_garbage, *read_ptr) != NULL)
+    {
+        read_ptr++;
+    }
+    
+    // --- Phase 2: Copy the numeric part and convert ---
+
+    const char* numeric_start = read_ptr;
+    const char* numeric_end = read_ptr;
+    
+    // Find the end of the number (next delimiter, space, or end of line)
+    while (*numeric_end != '\0' && *numeric_end != delimiter && *numeric_end != ' ' && *numeric_end != '\t' && *numeric_end != '\r' && *numeric_end != '\n')
+    {
+        numeric_end++;
+    }
+
+    size_t length = numeric_end - numeric_start;
+    
+    // Use a small, temporary buffer on the stack for the string representation
+    char temp_buf[16]; // Sufficient for a 32-bit integer string representation
+    
+    if (length > 0 && length < sizeof(temp_buf))
+    {
+        strncpy(temp_buf, numeric_start, length);
+        temp_buf[length] = '\0';
+        
+        // Convert the string buffer to an integer
+        *out_val = atoi(temp_buf);
+    }
+    else
+    {
+        // Handle error or empty string case by setting the value to 0
+        *out_val = 0;
+    }
+    
+    // --- Phase 3: Advance the pointer past the delimiter ---
+
+    read_ptr = numeric_end;
+
+    // If the loop stopped on the delimiter (e.g., comma), advance past it.
+    if (*read_ptr == delimiter)
+    {
+        read_ptr++;
+    }
+    
+    // Return the pointer to the next meaningful token
+    return read_ptr;
 }

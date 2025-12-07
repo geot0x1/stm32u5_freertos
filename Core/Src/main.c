@@ -79,7 +79,34 @@ static void test_task(void* args)
 
     // modem_serial_write(&lpuart_serial, "AT+CPIN?\r", 9);
 
+    while (1)
+    {
+        int ret = bg96_initialize(&bg96_module);
+        if (ret == 0)
+        {
+            printf("BG96 initialized successfully.\r\n");
+            break;
+        }
+        else
+        {
+            printf("BG96 initialization failed with error: %d. Retrying...\r\n", ret);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+    }
 
+    while (true)
+    {
+        if (bg96_set_iotopmode(&bg96_module) == AT_SUCCESS)
+        {
+            printf("BG96 IoT operation mode set successfully.\r\n");
+            break;
+        }
+        else
+        {
+            printf("Failed to set BG96 IoT operation mode. Retrying...\r\n");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+    }
 
     while (1)
     {
