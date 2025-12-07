@@ -278,6 +278,42 @@ int bg96_send_simple_at(Bg96* module)
     return AT_ERR_FAIL;
 }
 
+int bg96_set_minimum_functionality(Bg96* module)
+{
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = parse_simple_at;
+    handler.context = NULL;
+    handler.command = "AT+CFUN=0\r";
+    for (int i = 0; i < 3; i++)
+    {
+        int ret = bg96_send_at_command(module, &handler, 5000);
+        if (ret == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
+
+int bg96_set_full_functionality(Bg96* module)
+{
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = parse_simple_at;
+    handler.context = NULL;
+    handler.command = "AT+CFUN=1\r";
+    for (int i = 0; i < 3; i++)
+    {
+        int ret = bg96_send_at_command(module, &handler, 2000);
+        if (ret == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
+
 int bg96_query_network_info(Bg96* module, Bg96NetworkInfo* info)
 {
     AtHandler handler;
@@ -304,7 +340,7 @@ int bg96_set_iotopmode(Bg96* module)
     memset(&handler, 0, sizeof(handler));
     handler.response_handler = parse_simple_at;
     handler.context = NULL;
-    handler.command = "AT+QCFG=\"iotopmode\",1\r";
+    handler.command = "AT+QCFG=\"iotopmode\",0,1\r";
 
     for (int i = 0; i < 3; i++)
     {
@@ -331,11 +367,16 @@ int bg96_initialize(Bg96* module)
     {
         return AT_ERR_FAIL;
     }
-    Bg96NetworkInfo info;
-    if (bg96_query_network_info(module, &info) != AT_SUCCESS)
+    if (bg96_set_minimum_functionality(module) != AT_SUCCESS)
     {
         return AT_ERR_FAIL;
     }
+    // Bg96NetworkInfo info;
+    // if (bg96_query_network_info(module, &info) != AT_SUCCESS)
+    // {
+    //     return AT_ERR_FAIL;
+    // }
+
     return AT_SUCCESS;
 }
 
@@ -351,7 +392,11 @@ int bg96_connect(Bg96* module)
     // {
     //     return AT_ERR_FAIL;
     // }
-    if (bg96_get_network_registration(module, 10000) != AT_SUCCESS)
+    if (bg96_set_full_functionality(module) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+    if (bg96_get_network_registration(module, 100000) != AT_SUCCESS)
     {
         return AT_ERR_FAIL;
     }
