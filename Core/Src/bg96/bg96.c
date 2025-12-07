@@ -14,7 +14,7 @@
 
 typedef struct
 {
-    char* command;
+    const char* command;
     char response[256];
     size_t length;
     void* context;
@@ -193,7 +193,7 @@ int bg96_disable_echo(Bg96* module)
     memset(&handler, 0, sizeof(handler));
     handler.response_handler = parse_simple_at;
     handler.context = NULL;
-    handler.command = (char*)"ATE0\r";
+    handler.command = "ATE0\r";
     for (int i = 0; i < 3; i++)
     {
         int ret = bg96_send_at_command(module, &handler, 500);
@@ -211,7 +211,7 @@ int bg96_send_simple_at(Bg96* module)
     memset(&handler, 0, sizeof(handler));
     handler.response_handler = parse_simple_at;
     handler.context = NULL;
-    handler.command = (char*)"AT\r";
+    handler.command = "AT\r";
     for (int i = 0; i < 3; i++)
     {
         int ret = bg96_send_at_command(module, &handler, 500);
@@ -253,7 +253,7 @@ int bg96_query_creg(Bg96* module, Bg96CregStatus* status)
     handler.response_handler = creg_response_handler;
     handler.context = status;
     handler.length = 0;
-    handler.command = (char*)"AT+CREG?\r";
+    handler.command = "AT+CREG?\r";
 
     for (int i = 0; i < 3; i++)
     {
