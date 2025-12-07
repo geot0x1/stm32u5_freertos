@@ -84,7 +84,7 @@ int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, 
 {
     if (!stream || !stream->vtable || !stream->vtable->write || !stream->vtable->read || !handler || !command)
     {
-        return EINVAL;
+        return AT_ERR_BAD_INPUT;
     }
 
     at_handler_clear(handler);
@@ -95,7 +95,7 @@ int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, 
     // Read loop: poll for response until timeout (timeout in ms)
     uint32_t start = HAL_GetTick();
 
-    int err = ETIMEDOUT;
+    int err = AT_ERR_TIMEOUT;
     while ((HAL_GetTick() - start) < timeout)
     {
         uint8_t ch;
@@ -118,7 +118,7 @@ int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, 
                     err = handler->response_handler(handler->context, handler->response, resp_len);
                 }
                 at_handler_clear(handler);
-                if (err <= AT_OK)
+                if (err <= AT_SUCCESS)
                 {
                     return err;
                 }
@@ -132,7 +132,7 @@ int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, 
     }
 
     // Timeout — return with whatever we have
-    return ETIMEDOUT;
+    return AT_ERR_TIMEOUT;
 }
 
 static int parse_simple_at(void* ctx, const char* response, size_t length)
@@ -140,14 +140,14 @@ static int parse_simple_at(void* ctx, const char* response, size_t length)
     if (strstr(response, "OK\r\n"))
     {
         printf("Command succeeded.\n");
-        return AT_OK;
+        return AT_SUCCESS;
     }
     else if (strstr(response, "ERROR\r\n"))
     {
         printf("Command failed.\n");
-        return AT_OK;
+        return AT_SUCCESS;
     }
-    return AT_WAITING;
+    return AT_PENDING;
 }
 
 
@@ -165,19 +165,19 @@ static int creg_response_handler(void* ctx, const char* response, size_t length)
         const char net_status = response[9];
         printf("Network registration status: %c\n", net_status);
         st->n = net_status - '0'; // Convert char to int    
-        return AT_WAITING;
+        return AT_PENDING;
     }
     else if (strstr(response, "OK\r\n"))
     {
         printf("Received OK response.\n");
         st->ok_found = true;
-        return AT_OK;
+        return AT_SUCCESS;
     }
     else if (strstr(response, "ERROR\r\n"))
     {
-        return EIO;
+        return AT_ERR_FAIL;
     }
-    return AT_WAITING;
+    return AT_PENDING;
 }
 
 // int bg96_query_creg(Bg96* module, Bg96CregStatus* status)
@@ -222,7 +222,7 @@ int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
 int bg96_get_network_registration(Bg96* module, Bg96AtResult* result, uint32_t timeout_ms)
 {
     if (!result)
-        return BG96_AT_STATUS_FAIL;
+        return AT_ERR_BAD_INPUT;
 
     memset(result, 0, sizeof(*result));
     AtHandler handler;

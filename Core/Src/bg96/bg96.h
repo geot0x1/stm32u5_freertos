@@ -9,13 +9,12 @@ extern "C" {
 
 #include "modem_serial.h"
 
-#define EINVAL    -1
-#define ETIMEDOUT -2
-#define EIO       -3
-#define ENODATA   -4
-
-#define AT_OK      0
-#define AT_WAITING 1
+#define AT_SUCCESS           0
+#define AT_PENDING           1
+#define AT_ERR_BAD_INPUT    -1
+#define AT_ERR_TIMEOUT      -2
+#define AT_ERR_FAIL         -3 
+#define AT_ERR_NO_DATA      -4
 
 
 struct GsmStream;
