@@ -166,25 +166,36 @@ static int creg_response_handler(void* ctx, const char* response, size_t length)
     if (!ctx || !response) return 0;
 
     Bg96CregStatus* st = (Bg96CregStatus*)ctx;
-    const char* prefix = "+CREG:";
-    if (strncmp(response, prefix, strlen(prefix)) == 0)
-    {
-        st->response_found = true;
-        const char net_status = response[9];
-        printf("Network registration status: %c\n", net_status);
-        st->n = net_status - '0'; // Convert char to int    
-        return AT_PENDING;
-    }
-    else if (is_ok(response))
-    {
-        printf("Received OK response.\n");
-        st->ok_found = true;
-        return AT_SUCCESS;
-    }
-    else if (is_error(response))
+    if (is_error(response))
     {
         return AT_ERR_FAIL;
     }
+
+    if (st->response_found)
+    {
+        if (is_ok(response))
+        {
+            printf("Received OK response.\n");
+            st->ok_found = true;
+            return AT_SUCCESS;
+        }
+    }
+    else
+    {
+        const char* prefix = "+CREG:";
+        if (strncmp(response, prefix, strlen(prefix)) == 0 && length >= 10)
+        {
+            const char *comma = strchr(response, ',');
+            if (comma)
+            {
+                const char *net_status_ptr = skip_spaces(comma + 1);
+                st->response_found = true;
+                st->n = *net_status_ptr - '0';
+            }
+            return AT_PENDING;
+        }
+    }
+    
     return AT_PENDING;
 }
 
