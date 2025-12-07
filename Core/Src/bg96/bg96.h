@@ -71,6 +71,7 @@ typedef struct
 int bg96_init(Bg96* module);
 void bg96_power_on(Bg96* module);
 int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms);
+int bg96_connect(Bg96* module);
 
 // High-level AT status common to all AT commands
 typedef enum
@@ -101,7 +102,8 @@ Bg96AtStatus bg96_send_at_result(Bg96* module, const char* command, Bg96AtResult
 int bg96_query_creg(Bg96* module, Bg96CregStatus* status);
 
 
-int bg96_get_network_registration(Bg96* module, Bg96AtResult* result, uint32_t timeout_ms);
+int bg96_get_network_registration(Bg96* module, uint32_t timeout_ms);
+
 
 
 

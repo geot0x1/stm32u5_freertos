@@ -85,22 +85,25 @@ static void test_task(void* args)
     {
         BSP_LED_Toggle(LED_GREEN);
 
-        printf("Sending AT command: \r\n");
-        vTaskDelay(pdMS_TO_TICKS(500));
-        bg96_send_at(&bg96_module, "AT\r", 2000);
+        bg96_connect(&bg96_module);
+        vTaskDelay(pdMS_TO_TICKS(2000));
 
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        // printf("Sending AT command: \r\n");
+        // vTaskDelay(pdMS_TO_TICKS(500));
+        // bg96_send_at(&bg96_module, "AT\r", 2000);
 
-        Bg96AtResult atres;
-        int ret = bg96_get_network_registration(&bg96_module, &atres, 2000);
-        if (ret == 0)
-        {
-            printf("BG96 Network Registration Status: %d\r\n", atres.detail.creg.n);
-        }
-        else
-        {
-            printf("Failed to get network registration, error: %d\r\n", ret);
-        }
+        // vTaskDelay(pdMS_TO_TICKS(3000));
+
+        // Bg96AtResult atres;
+        // int ret = bg96_get_network_registration(&bg96_module, &atres, 2000);
+        // if (ret == 0)
+        // {
+        //     printf("BG96 Network Registration Status: %d\r\n", atres.detail.creg.n);
+        // }
+        // else
+        // {
+        //     printf("Failed to get network registration, error: %d\r\n", ret);
+        // }
         
         // Bg96CregStatus creg_status;
         // bg96_query_creg(&bg96_module, &creg_status);

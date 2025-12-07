@@ -14,6 +14,7 @@
 
 typedef struct
 {
+    char* command;
     char response[256];
     size_t length;
     void* context;
@@ -26,6 +27,7 @@ typedef struct
 static void print_response(const char* response, size_t length);
 static bool is_ok(const char* response);
 static bool is_error(const char* response);
+static int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout);
 
 
 
@@ -80,7 +82,12 @@ static int at_handler_append_char(AtHandler* handler, char c)
     return -1; // Buffer full
 }
 
-int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
+int bg96_send_at_command(Bg96* module, AtHandler* handler, uint32_t timeout_ms)
+{
+    return send_at_command(&native_stream, handler->command, handler, timeout_ms);
+}
+
+static int send_at_command(GsmStream* stream, const char* command, AtHandler* handler, uint32_t timeout)
 {
     if (!stream || !stream->vtable || !stream->vtable->write || !stream->vtable->read || !handler || !command)
     {
@@ -180,32 +187,85 @@ static int creg_response_handler(void* ctx, const char* response, size_t length)
     return AT_PENDING;
 }
 
-// int bg96_query_creg(Bg96* module, Bg96CregStatus* status)
-// {
-//     if (!status)
-//         return -1;
+int bg96_disable_echo(Bg96* module)
+{
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = parse_simple_at;
+    handler.context = NULL;
+    handler.command = (char*)"ATE0\r";
+    for (int i = 0; i < 3; i++)
+    {
+        int ret = bg96_send_at_command(module, &handler, 500);
+        if (ret == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
 
-//     AtHandler handler;
-//     // initialize output
-//     memset(status, 0, sizeof(*status));
-//     handler.response_handler = creg_response_handler;
-//     handler.context = status;
-//     handler.length = 0;
-//     memset(handler.response, 0, sizeof(handler.response));
+int bg96_send_simple_at(Bg96* module)
+{
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = parse_simple_at;
+    handler.context = NULL;
+    handler.command = (char*)"AT\r";
+    for (int i = 0; i < 3; i++)
+    {
+        int ret = bg96_send_at_command(module, &handler, 500);
+        if (ret == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
 
-//     // send command; include CR
-//     const char* cmd = "AT+CREG?\r";
-//     int r = send_at_command(&native_stream, cmd, &handler, 2000);
-//     if (r <= 0)
-//     {
-//         return -1; // timeout or no data
-//     }
 
-//     // success: status filled by handler (handler sets flags)
-//     if (status->response_found && status->ok_found)
-//         return 0;
-//     return -1;
-// }
+
+int bg96_connect(Bg96* module)
+{
+    if (bg96_send_simple_at(module) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+    if (bg96_disable_echo(module) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+    if (bg96_get_network_registration(module, 10000) != AT_SUCCESS)
+    {
+        return AT_ERR_FAIL;
+    }
+
+    return 0;
+}
+
+int bg96_query_creg(Bg96* module, Bg96CregStatus* status)
+{
+    if (!status)
+        return -1;
+
+    AtHandler handler;
+    memset(&handler, 0, sizeof(handler));
+    handler.response_handler = creg_response_handler;
+    handler.context = status;
+    handler.length = 0;
+    handler.command = (char*)"AT+CREG?\r";
+
+    for (int i = 0; i < 3; i++)
+    {
+        memset(status, 0, sizeof(Bg96CregStatus));
+        int r = bg96_send_at_command(module, &handler, 2000);
+        if (r == AT_SUCCESS)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_FAIL;
+}
 
 
 int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
@@ -219,22 +279,27 @@ int bg96_send_at(Bg96* module, const char* command, uint32_t timeout_ms)
     return send_at_command(&native_stream, command, &handler, timeout_ms);
 }
 
-int bg96_get_network_registration(Bg96* module, Bg96AtResult* result, uint32_t timeout_ms)
+int bg96_get_network_registration(Bg96* module, uint32_t timeout_ms)
 {
-    if (!result)
-        return AT_ERR_BAD_INPUT;
-
-    memset(result, 0, sizeof(*result));
-    AtHandler handler;
-    memset(&handler, 0, sizeof(handler));
-    handler.response_handler = creg_response_handler;
-    handler.context = &result->detail.creg;
-    handler.length = 0;
-
-    const char* cmd = "AT+CREG?\r";
-    int r = send_at_command(&native_stream, cmd, &handler, timeout_ms);
-
-    return 0;
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        Bg96CregStatus status;
+        int r = bg96_query_creg(module, &status);
+        if (r != AT_SUCCESS)
+        {
+            return AT_ERR_FAIL;
+        }
+        if (!status.response_found || !status.ok_found)
+        {
+            return AT_ERR_FAIL;
+        }
+        if (status.n == BG96_NETWORK_REG_REGISTERED_HOME || status.n == BG96_NETWORK_REG_REGISTERED_ROAMING)
+        {
+            return AT_SUCCESS;
+        }
+    }
+    return AT_ERR_TIMEOUT;
 }
 
 
