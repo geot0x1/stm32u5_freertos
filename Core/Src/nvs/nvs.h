@@ -1,104 +1,109 @@
 #ifndef NVS_H
 #define NVS_H
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include "FreeRTOS.h"
-#include "queue.h"
-#include "semphr.h"
 #include <stdint.h>
-#include <string.h>
-#include <stdbool.h>
+#include <stddef.h>
 
-#define NVS_ERR               (-1)
-#define NVS_ERR_READ_NO_SPACE (-2)
-#define NVS_OK                (0)
-#define NVS_EMPTY             (1)
-#define NVS_NOT_READY         (2)
+/*===========================================================================
+ *  Flash layout constraints (STM32C0xx)
+ *
+ *  - Programs in 8-byte (64-bit) double-words only.
+ *  - Target block must be fully erased (0xFF) before programming.
+ *  - No in-place byte updates are possible.
+ *
+ *  NVS design:
+ *  - Sector header: 8 bytes (magic + seq). Written once, atomically.
+ *  - Entries: written atomically with state = VALID from the start.
+ *    No two-phase commit (avoids writing the same block twice).
+ *  - Old entries (superseded by a newer write of the same key) are NOT
+ *    marked deleted in-place. The reader scans forward and takes the last
+ *    match, so superseded entries are transparently ignored.
+ *  - GC copies only the latest entry for each key, then erases the old sector.
+ *===========================================================================*/
+
+/*===========================================================================
+ *  Constants
+ *===========================================================================*/
+
+/** Sector header magic word: "NVS!" in little-endian */
+#define NVS_MAGIC_WORD (0x4E565321U)
+
+/** Entry state byte values */
+#define NVS_ENTRY_VALID (0xFEU) /**< Entry is committed and readable     */
+
+/** Size limits */
+#define NVS_MAX_KEY_LEN (15U)
+#define NVS_MAX_DATA_LEN (128U)
+
+/**
+ * Sector header: 8 bytes = magic(4) + seq(4).
+ * Written as a single 8-byte flash write.
+ */
+#define NVS_SECTOR_HDR_SIZE (8U)
+
+/**
+ * Entry fixed header: 8 bytes.
+ *  Byte 0   : state  (NVS_ENTRY_VALID or 0xFF = erased / end-of-log)
+ *  Byte 1   : key_len
+ *  Byte 2   : data_len
+ *  Byte 3   : reserved (0xFF)
+ *  Bytes 4-7: CRC32 over (key_len + data_len + key[] + data[])
+ */
+#define NVS_ENTRY_HDR_SIZE (8U)
+
+/*===========================================================================
+ *  Types
+ *===========================================================================*/
+
+typedef enum
+{
+    NVS_OK = 0,
+    NVS_ERR_NOT_FOUND,
+    NVS_ERR_NO_SPACE,
+    NVS_ERR_FLASH,
+    NVS_ERR_CRC,
+    NVS_ERR_INVALID_ARG
+} nvs_err_t;
+
+/*===========================================================================
+ *  Flash driver interface — injected at mount time
+ *===========================================================================*/
 
 typedef struct
 {
-    uint16_t first_sector;
-    uint16_t last_sector;
+    void (*write)(uint32_t addr, const void *data, uint16_t len);
+    void (*read)(uint32_t addr, void *data, uint16_t len);
+    void (*erase_sector)(uint32_t addr);
+
+    /** Absolute flash address of the first NVS sector. */
+    uint32_t base_addr;
+
+    /** Size of one flash sector in bytes (must be a multiple of 8). */
     uint32_t sector_size;
-    uint16_t page_size;
 
-    uint32_t          ate_write_addr;
-    uint32_t          data_write_addr;
-    uint32_t          ate_read_addr;
-    uint32_t          start_read_addr;
-    SemaphoreHandle_t semaphore;
-    bool              ready;
-} Nvs;
+    /** Number of sectors allocated to NVS. */
+    uint8_t sector_count;
+} nvs_flash_driver_t;
 
-/**
- * @brief Initializes the Non-Volatile Storage (NVS).
- *
- * This function initializes the NVS by setting private values, restoring the head from flash memory,
- * and printing the head information.
- *
- * @param nvs Pointer to the `Nvs` structure representing the Non-Volatile Storage.
- * @return Returns NVS_OK on successful initialization, or an error code on failure.
- */
-int nvs_init(Nvs* nvs);
+/*===========================================================================
+ *  RAM context
+ *===========================================================================*/
 
-/**
- * @brief Writes data to the Non-Volatile Storage (NVS).
- *
- * This function writes data to the NVS. It first checks if there is enough space in the current sector,
- * and if not, it moves to the next sector, erases it, writes a closing block, and updates the head.
- * It then generates a new ID, calculates the data offset, creates metadata, and writes both metadata and data.
- * If the read pointer is at the default state, it is set to the write pointer.
- *
- * @param nvs Pointer to the `Nvs` structure representing the Non-Volatile Storage.
- * @param data Pointer to the data to be written.
- * @param data_len Length of the data to be written.
- * @return Returns NVS_OK on successful write, or an error code on failure.
- */
-int nvs_write(Nvs* nvs, void* data, size_t data_len);
+typedef struct
+{
+    uint32_t active_sector_addr;
+    uint32_t write_offset;
+    uint32_t seq_counter;
+    nvs_flash_driver_t driver;
+} nvs_context_t;
 
-/**
- * @brief Reads data from the Non-Volatile Storage (NVS) into a buffer.
- *
- * This function reads data from the NVS into the provided buffer.
- *
- * @param nvs Pointer to the `Nvs` structure representing the Non-Volatile Storage.
- * @param data Pointer to the buffer where the data will be stored.
- * @param size Size of the buffer in bytes.
- * @return Returns 0 on success, or -1 if there is no data in the flash or if the data is too big to fit in the buffer.
- */
-int nvs_read(Nvs* nvs, void* data, size_t size);
+/*===========================================================================
+ *  Public API
+ *===========================================================================*/
 
-/**
- * @brief Deletes data from the Non-Volatile Storage (NVS).
- *
- * This function deletes data from the NVS based on the specified number of items.
- *
- * @param nvs Pointer to the `Nvs` structure representing the Non-Volatile Storage.
- * @return Returns `NVS_OK` on success, or `NVS_ERR` if there is no data in the flash.
- */
-int nvs_delete(Nvs* nvs);
+nvs_err_t nvs_mount(const nvs_flash_driver_t *driver);
+nvs_err_t nvs_write(const char *key, const void *data, uint8_t len);
+nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_len);
+nvs_err_t nvs_delete(const char *key);
 
-/**
- * @brief Erases the Non-Volatile Storage (NVS) area.
- *
- * This function erases the NVS area by performing a 64k block erase on each sector within the
- * specified range.
- *
- * @param nvs Pointer to the `Nvs` structure representing the Non-Volatile Storage.
- */
-void nvs_erase(Nvs* nvs);
-
-/**
- * @brief Mounts a fifo area to the physical memory device.
- * 
- * @param nvs Pointer to the object containing the data management.
- */
-void nvs_mount(Nvs *nvs);
-
-
-#ifdef __cplusplus
-}
-#endif
-#endif
+#endif /* NVS_H */

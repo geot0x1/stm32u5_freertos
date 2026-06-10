@@ -1,861 +1,575 @@
-/**
- * @file nvs.c
- * @brief Non-Volatile Storage (NVS) Implementation
- */
-
 #include "nvs.h"
-#include "assert_macro.h"
 #include "crc_gen.h"
-#include "serial_flash_mem.h"
-#include "trace_logger.h"
 #include <string.h>
 
-#ifdef CONFIG_NVS_MODULE_DEBUG
-#define NVS_LOG(x, ...) TRACE_LOG_PRINT(x, ##__VA_ARGS__)
-#else
-#define NVS_LOG(x, ...) (void)0
-#endif
+/*===========================================================================
+ *  Module state
+ *===========================================================================*/
 
-/**
- * Closing block status:
- * id = FFFF
- * len = 0
- * offset = same as block write address
- * part = FF
+static nvs_context_t gNvs;
+
+#define DRV_WRITE(addr, data, len) gNvs.driver.write((addr), (data), (len))
+#define DRV_READ(addr, data, len) gNvs.driver.read((addr), (data), (len))
+#define DRV_ERASE(addr) gNvs.driver.erase_sector((addr))
+#define SECTOR_SIZE gNvs.driver.sector_size
+#define SECTOR_COUNT gNvs.driver.sector_count
+
+/*===========================================================================
+ *  Addressing helpers
+ *===========================================================================*/
+
+static inline uint32_t sector_addr(uint8_t idx)
+{
+    return gNvs.driver.base_addr + (uint32_t)idx * SECTOR_SIZE;
+}
+
+/* Round up to 8-byte boundary (matches STM32C0xx programming granularity). */
+static inline uint32_t align8(uint32_t v)
+{
+    return (v + 7U) & ~7U;
+}
+
+static inline uint32_t entry_total_size(uint8_t key_len, uint8_t data_len)
+{
+    return align8(NVS_ENTRY_HDR_SIZE + (uint32_t)key_len + (uint32_t)data_len);
+}
+
+/*===========================================================================
+ *  Sector header I/O
  *
- * Zero (cleared) block status:
- * id = 0
- * len != 0
- * part FF
- */
+ *  Header layout (8 bytes, single atomic write):
+ *    Bytes 0-3: magic (NVS_MAGIC_WORD)
+ *    Bytes 4-7: seq   (monotonically increasing)
+ *===========================================================================*/
 
-// Sector and data constraints
-#define NVS_SECTOR_SIZE  (65536)  // 64KB sector size
-#define MAXIMUM_DATA_LEN (2048)   // Maximum data payload per entry
-// Dynamic calculation: MAXIMUM_VALID_ID = (sector_size / sizeof(NvsAte))
-// For 65536 byte sector with 8 byte ATE: 65536/8 = 8192
-// Using 7281 to leave safety margin for closing blocks and sector boundaries
-#define MAXIMUM_VALID_ID ((NVS_SECTOR_SIZE / sizeof(NvsAte)) - 911)
-
-// Address masks for sector and offset extraction
-#define ADDR_SECT_MASK        (0xFFFF0000)
-#define ADDR_SECTOR_BASE_MASK (0xFFFF0000)
-#define BLOCK_OFFSET_MASK     (0x0000FFFF)
-#define OFFSET_ADDR_MASK      (0x0000FFFF)
-#define ADDR_PAGE_MASK        (0xFFFFFF00)
-
-#define BLOCK_INIT_VALUE {.id = 0xFFFF, .offset = 0xFFFF, .len = 0xFFFF, .part = 0xFF, .crc8 = 0xFF}
-
-#define NVS_ATE_SIZE (sizeof(NvsAte))
-
-typedef enum
+static int read_sector_hdr(uint32_t base, uint32_t *magic, uint32_t *seq)
 {
-    META_BLOCK_NOT_VALID,
-    META_BLOCK_IS_VALID,
-    META_BLOCK_ERASED,
-    META_BLOCK_ZERO,
-    META_BLOCK_CLOSING,
-} MetaBlockStatus;
-
-typedef struct nvs_ate NvsAte;
-
-struct nvs_ate
-{
-    uint16_t id;     /* data id */
-    uint16_t offset; /* data offset within sector */
-    uint16_t len;    /* data len within sector */
-    uint8_t  part;   /* part of a multipart data - future extension */
-    uint8_t  crc8;   /* crc8 check of the entry */
-} __attribute__((packed));
-
-BUILD_ASSERT(offsetof(struct nvs_ate, crc8) == sizeof(struct nvs_ate) - sizeof(uint8_t),
-             "crc8 must be the last member");
-
-static uint32_t        get_sector_address(Nvs *nvs, int sec_num);
-static bool            is_meta_block_valid(const NvsAte *meta_ptr);
-static bool            is_closing_block(const NvsAte *block, uint16_t offset);
-static void            print_meta(NvsAte *meta);
-static void            erase_sector(Nvs *nvs, uint16_t sec_num);
-static bool            is_block_erased(NvsAte *block);
-static bool            is_block_zero(NvsAte *block);
-static MetaBlockStatus get_block_status(NvsAte *block, uint16_t offset);
-static void            semaphore_lock(Nvs *nvs);
-static void            semaphore_unlock(Nvs *nvs);
-static int             semaphore_trylock(Nvs *nvs, uint32_t timeout);
-static int             read_meta_block(uint32_t addr, NvsAte *block);
-static void            write_meta_block(Nvs *nvs, uint16_t data_len, uint32_t data_offset);
-static void            write_data(Nvs *nvs, void *data, uint16_t data_len);
-static void            write_closing(Nvs *nvs);
-static inline uint32_t sector_number_from_address(uint32_t addr);
-static inline uint32_t next_sector(const Nvs *nvs, uint32_t sec_num);
-static int find_write_addr(Nvs *nvs);
-static int find_read_addr(Nvs *nvs);
-
-static void nvs_erase_prv(Nvs *nvs)
-{
-    NVS_LOG("\r\n[NVS] Erasing entire FIFO area\r\n");
-    for (int sec = nvs->first_sector; sec <= nvs->last_sector; sec++)
-    {
-        uint32_t sec_addr = sec * nvs->sector_size;
-        serial_flash_mem_erase_64k_block(sec_addr);
-        NVS_LOG("[NVS] Erased sector %d at addr 0x%lX\r\n", sec, sec_addr);
-    }
-    NVS_LOG("[NVS] Erase complete\r\n\r\n");
+    uint8_t hdr[8];
+    DRV_READ(base, hdr, 8);
+    *magic = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16)
+        | ((uint32_t)hdr[3] << 24);
+    *seq = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16)
+        | ((uint32_t)hdr[7] << 24);
+    return (*magic == NVS_MAGIC_WORD && *seq != 0xFFFFFFFFU);
 }
 
-void nvs_erase(Nvs *nvs)
+/* Single 8-byte write — target must be erased. */
+static void write_sector_hdr(uint32_t base, uint32_t seq)
 {
-    semaphore_lock(nvs);
-    nvs_erase_prv(nvs);
-    semaphore_unlock(nvs);
+    uint8_t hdr[8];
+    hdr[0] = (uint8_t)(NVS_MAGIC_WORD);
+    hdr[1] = (uint8_t)(NVS_MAGIC_WORD >> 8);
+    hdr[2] = (uint8_t)(NVS_MAGIC_WORD >> 16);
+    hdr[3] = (uint8_t)(NVS_MAGIC_WORD >> 24);
+    hdr[4] = (uint8_t)(seq);
+    hdr[5] = (uint8_t)(seq >> 8);
+    hdr[6] = (uint8_t)(seq >> 16);
+    hdr[7] = (uint8_t)(seq >> 24);
+    DRV_WRITE(base, hdr, 8);
 }
 
-int nvs_init(Nvs *nvs)
-{
-    ASSERT(nvs->page_size == 256);
-    ASSERT((nvs->last_sector - nvs->first_sector) + 1 > 2);
-    ASSERT(nvs->sector_size == NVS_SECTOR_SIZE);
+/*===========================================================================
+ *  Entry header I/O
+ *===========================================================================*/
 
-    if (nvs->semaphore == NULL)
-    {
-        nvs->semaphore = xSemaphoreCreateRecursiveMutex();
-        xSemaphoreGiveRecursive(nvs->semaphore);
-    }
-    ASSERT(nvs->semaphore != NULL);
-	serial_flash_mem_init();
-    return NVS_OK;
+static uint8_t read_entry_hdr(uint32_t addr, uint8_t *key_len, uint8_t *data_len, uint32_t *crc)
+{
+    uint8_t hdr[NVS_ENTRY_HDR_SIZE];
+    DRV_READ(addr, hdr, NVS_ENTRY_HDR_SIZE);
+    *key_len = hdr[1];
+    *data_len = hdr[2];
+    *crc = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16)
+        | ((uint32_t)hdr[7] << 24);
+    return hdr[0]; /* state */
 }
 
-void nvs_mount(Nvs *nvs)
+static uint32_t compute_entry_crc(
+    uint8_t key_len, uint8_t data_len, const uint8_t *key, const uint8_t *data)
 {
-    semaphore_lock(nvs);
-
-    NVS_LOG("\r\n[NVS] ========== NVS MOUNT START ==========\r\n");
-    nvs->ready           = false;
-    nvs->ate_read_addr   = 0;
-    nvs->start_read_addr = 0;
-    nvs->ate_write_addr  = 0;
-    nvs->data_write_addr = 0;
-
-    NVS_LOG("[NVS] Finding write head...\r\n");
-    if (find_write_addr(nvs) == 0)
-    {
-        NVS_LOG("[NVS] Head found at: %lu\r\n", nvs->ate_write_addr);
-        NVS_LOG("[NVS] Finding read tail...\r\n");
-        find_read_addr(nvs);
-    }
-    else
-    {
-        nvs_erase(nvs);
-        nvs->ate_write_addr  = (nvs->first_sector * nvs->sector_size) + nvs->sector_size - sizeof(NvsAte);
-        nvs->data_write_addr = (nvs->first_sector * nvs->sector_size);
-    }
-
-    if (nvs->ate_read_addr == 0)
-    {
-        nvs->ate_read_addr   = nvs->ate_write_addr;
-        nvs->start_read_addr = nvs->ate_write_addr;
-    }
-
-    NVS_LOG("\r\n[NVS] --- MOUNT COMPLETE ---\r\n");
-    NVS_LOG("[NVS] Head is: %lu (sec %lu)\r\n", nvs->ate_write_addr, (nvs->ate_write_addr & ADDR_SECT_MASK) >> 16);
-    NVS_LOG("[NVS] Tail is: %lu (sec %lu)\r\n", nvs->ate_read_addr, (nvs->ate_read_addr & ADDR_SECT_MASK) >> 16);
-    NVS_LOG("[NVS] Tail start is: %lu\r\n", nvs->start_read_addr);
-    NVS_LOG("[NVS] Data write addr: %lu\r\n", nvs->data_write_addr);
-    NVS_LOG("[NVS] ========== NVS MOUNT END ==========\r\n\r\n");
-
-    nvs->ready = true;
-
-    semaphore_unlock(nvs);
-    return;
+    uint8_t buf[2U + NVS_MAX_KEY_LEN + NVS_MAX_DATA_LEN];
+    uint32_t n = 0;
+    buf[n++] = key_len;
+    buf[n++] = data_len;
+    memcpy(&buf[n], key, key_len);
+    n += key_len;
+    memcpy(&buf[n], data, data_len);
+    n += data_len;
+    return crc32_gen(buf, n, 0xFFFFFFFF);
 }
 
-static void semaphore_lock(Nvs *nvs)
+/*===========================================================================
+ *  Sector sorting (descending seq)
+ *===========================================================================*/
+
+static void get_sectors_by_seq_desc(uint8_t *out_idx, uint8_t *out_count)
 {
-    //! Block forever until it locks.
-    while (semaphore_trylock(nvs, portMAX_DELAY) != pdTRUE)
-        ;
-}
+    uint32_t seqs[16];
+    uint8_t valid[16];
+    uint8_t n = 0;
 
-static void semaphore_unlock(Nvs *nvs)
-{
-    ASSERT(nvs->semaphore != NULL);
-    BaseType_t ret = xSemaphoreGiveRecursive(nvs->semaphore);
-    ASSERT(ret == pdTRUE);
-}
-
-static int semaphore_trylock(Nvs *nvs, uint32_t timeout)
-{
-    ASSERT(nvs->semaphore != NULL);
-    if (nvs->semaphore == NULL)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
-        return pdFALSE;
-    }
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        return xSemaphoreTakeRecursive(nvs->semaphore, timeout);
-    }
-    else
-    {
-        return xSemaphoreTakeRecursive(nvs->semaphore, 0);
-    }
-}
-
-static void delete_next_sector(const Nvs *nvs)
-{
-    uint32_t sec           = sector_number_from_address(nvs->ate_write_addr);
-    sec                    = next_sector(nvs, sec);
-    uint32_t sec_base_addr = (sec * nvs->sector_size);
-    serial_flash_mem_erase_64k_block(sec_base_addr);
-}
-
-static int nvs_write_prv(Nvs *nvs, void *data, size_t data_len)
-{
-    // Input validation
-    if (data_len > MAXIMUM_DATA_LEN)
-    {
-        NVS_LOG("[NVS ERROR] Data length %zu exceeds MAXIMUM_DATA_LEN (%d)\r\n", data_len, MAXIMUM_DATA_LEN);
-        return NVS_ERR;
-    }
-
-    //! We need at least one meta block, one closing block and we add one more to be safe.
-    const int SPACE_NEEDED = data_len + (3 * sizeof(NvsAte));
-
-    int available_size = 0;
-    if (nvs->ate_write_addr > nvs->data_write_addr)
-    {
-        available_size = nvs->ate_write_addr - nvs->data_write_addr;
-    }
-
-    if (SPACE_NEEDED >= available_size)
-    {
-        //! Sector full - implement wrap logic with "bulk drop" of oldest sector
-        //! 1. Erase the next sector (which will become our new write target)
-        //! 2. Write closing block to current sector
-        //! 3. Move write head to the newly erased sector
-        //! 4. If read tail is in the same sector, advance it to preserve FIFO integrity
-        NVS_LOG("\r\n[NVS] *** SECTOR FULL - WRAPPING ***\r\n");
-        NVS_LOG("[NVS] Current sec: %lu, needed: %d, available: %d\r\n", 
-                sector_number_from_address(nvs->ate_write_addr), SPACE_NEEDED, available_size);
-        
-        delete_next_sector(nvs);  // Erase next sector before switching
-        write_closing(nvs);       // Close current sector
-
-        uint32_t sec = sector_number_from_address(nvs->ate_write_addr);
-        sec          = next_sector(nvs, sec);
-
-        uint32_t sec_base_addr = (sec * nvs->sector_size);
-        nvs->ate_write_addr    = sec_base_addr + nvs->sector_size - sizeof(NvsAte);
-        nvs->data_write_addr   = nvs->ate_write_addr & ADDR_SECT_MASK;
-
-        // Critical: Check if write head caught up with read tail (buffer overflow)
-        if ((nvs->ate_write_addr & ADDR_SECT_MASK) == (nvs->ate_read_addr & ADDR_SECT_MASK))
+        uint32_t magic, seq;
+        if (read_sector_hdr(sector_addr(i), &magic, &seq))
         {
-            //! Buffer is full - drop oldest 64KB sector by advancing read tail
-            NVS_LOG("[NVS WARN] Buffer full - dropping oldest sector (bulk drop)\r\n");
-            uint32_t read_sec = sector_number_from_address(nvs->ate_read_addr);
-            read_sec          = next_sector(nvs, read_sec);
-
-            nvs->ate_read_addr   = (read_sec * nvs->sector_size) + nvs->sector_size - sizeof(NvsAte);
-            nvs->start_read_addr = nvs->ate_read_addr;
-            NVS_LOG("[NVS] Read tail advanced to sec: %lu (addr: %lu)\r\n", read_sec, nvs->ate_read_addr);
+            valid[n] = i;
+            seqs[n] = seq;
+            n++;
         }
-        NVS_LOG("[NVS] Write head moved to sec: %lu (addr: %lu)\r\n", 
-                sector_number_from_address(nvs->ate_write_addr), nvs->ate_write_addr);
     }
-    // CRITICAL: Capture data offset BEFORE write_data() updates data_write_addr
-    uint32_t data_offset = nvs->data_write_addr;
-    write_data(nvs, data, data_len);
-    write_meta_block(nvs, data_len, data_offset);
-    NVS_LOG("[NVS] Write OK: len=%d, addr=%lu\r\n", data_len, nvs->ate_write_addr + sizeof(NvsAte));
-    return NVS_OK;
-}
 
-int nvs_write(Nvs *nvs, void *data, size_t data_len)
-{
-    if (nvs->ready == false)
+    for (uint8_t i = 1; i < n; i++)
     {
-        return NVS_NOT_READY;
-    }
-    int ret = -1;
-    semaphore_lock(nvs);
-    ret = nvs_write_prv(nvs, data, data_len);
-    semaphore_unlock(nvs);
-    return ret;
-}
-
-static int nvs_read_prv(Nvs *nvs, void *data, size_t size)
-{
-    MetaBlockStatus status;
-    uint32_t        consecutive_not_valid_count = 0;
-    NVS_LOG("[NVS] Read attempt from addr: %lu\r\n", nvs->ate_read_addr);
-    do
-    {
-        uint32_t       sec           = sector_number_from_address(nvs->ate_read_addr);
-        const uint32_t SEC_BASE_ADDR = sec * nvs->sector_size;
-        NvsAte         block         = BLOCK_INIT_VALUE;
-
-        read_meta_block(nvs->ate_read_addr, &block);
-        status = get_block_status(&block, nvs->ate_read_addr & OFFSET_ADDR_MASK);
-        if (status != META_BLOCK_NOT_VALID)
+        uint32_t s = seqs[i];
+        uint8_t v = valid[i];
+        int j = (int)i - 1;
+        while (j >= 0 && seqs[j] < s)
         {
-            consecutive_not_valid_count = 0;
+            seqs[j + 1] = seqs[j];
+            valid[j + 1] = valid[j];
+            j--;
         }
-        
-        if (status == META_BLOCK_ERASED)
+        seqs[j + 1] = s;
+        valid[j + 1] = v;
+    }
+
+    memcpy(out_idx, valid, n);
+    *out_count = n;
+}
+
+/*===========================================================================
+ *  Scan write offset
+ *===========================================================================*/
+
+static uint32_t scan_write_offset(uint32_t base)
+{
+    uint32_t off = NVS_SECTOR_HDR_SIZE;
+
+    while (off < SECTOR_SIZE)
+    {
+        uint8_t kl, dl;
+        uint32_t crc;
+        uint8_t st = read_entry_hdr(base + off, &kl, &dl, &crc);
+
+        if (st != NVS_ENTRY_VALID)
         {
-            if ((nvs->ate_read_addr == nvs->ate_write_addr))
-            {
-                NVS_LOG("[NVS] NVS EMPTY (read == write)\r\n");
-                return NVS_EMPTY;
-            }
-            else
-            {
-                NVS_LOG("[NVS ERROR] ERASED TAIL - resetting read pointer\r\n");
-                find_read_addr(nvs);
-            }
+            break; /* 0xFF = erased = end of log */
         }
 
-        if (status == META_BLOCK_IS_VALID)
+        uint32_t esz = entry_total_size(kl, dl);
+        if (esz == 0 || off + esz > SECTOR_SIZE)
         {
-            uint32_t sector_base    = nvs->ate_read_addr & ADDR_SECT_MASK;
-            uint32_t data_read_addr = sector_base + block.offset;
-            if (block.len > size)
-            {
-                return NVS_ERR_READ_NO_SPACE;
-            }
-            serial_flash_mem_read(data_read_addr, data, block.len);
-
-            NVS_LOG("VALID ate_read_addr: %lu\r\n", nvs->ate_read_addr);
-            NVS_LOG("VALID start_read_addr: %lu\r\n", nvs->start_read_addr);
-            nvs->ate_read_addr -= sizeof(NvsAte);
-            return NVS_OK;
-        }
-
-        if (status == META_BLOCK_NOT_VALID)
-        {
-            // Clean-on-Read policy: Explicitly mark invalid blocks as deleted in flash
-            // to prevent them from being read again in future operations.
-            consecutive_not_valid_count++;
-            NVS_LOG("[NVS] NOTVALID ate_read_addr: %lu - marking as deleted\r\n", nvs->ate_read_addr);
-            
-            // Mark the block as deleted by setting id = 0 (similar to nvs_delete_prv)
-            block.id = 0;
-            serial_flash_mem_write(nvs->ate_read_addr, &block, sizeof(NvsAte));
-            
-            nvs->ate_read_addr -= sizeof(NvsAte);
-        }
-
-        if (status == META_BLOCK_ZERO)
-        {
-            nvs->ate_read_addr -= sizeof(NvsAte);
-        }
-        if (status == META_BLOCK_CLOSING)
-        {
-            NVS_LOG("[NVS] CLOSING block found - jumping to next sector\r\n");
-            sec                = next_sector(nvs, sec);
-            nvs->ate_read_addr = (sec * nvs->sector_size) + nvs->sector_size - sizeof(NvsAte);
-            NVS_LOG("[NVS] New read addr: %lu (sec %lu)\r\n", nvs->ate_read_addr, sec);
-        }
-
-        //! This is in case no closing block found and we are very below to sector
-        // Fixed: Use else-if or better, check if we ALREADY jumped in this loop iteration
-        // to avoid double jumps when wrapping from last_sector to first_sector.
-        else if (nvs->ate_read_addr < SEC_BASE_ADDR + sizeof(NvsAte))
-        {
-            NVS_LOG("[NVS] Hit sector boundary without closing - jumping to next\r\n");
-            sec                = next_sector(nvs, sec);
-            nvs->ate_read_addr = (sec * nvs->sector_size) + nvs->sector_size - sizeof(NvsAte);
-            NVS_LOG("[NVS] New read addr: %lu (sec %lu)\r\n", nvs->ate_read_addr, sec);
-        }
-
-        if (consecutive_not_valid_count > 8)
-        {
-            NVS_LOG("[NVS ERROR] Too many invalid blocks (%lu) - resetting tail !!!\r\n", consecutive_not_valid_count);
-            find_read_addr(nvs);
             break;
         }
-    } while ((status == META_BLOCK_ZERO) || (status == META_BLOCK_CLOSING) || (status == META_BLOCK_NOT_VALID));
 
-    return NVS_ERR;
-}
-
-int nvs_read(Nvs *nvs, void *data, size_t size)
-{
-    if (nvs->ready == false)
-    {
-        return NVS_NOT_READY;
-    }
-    int ret = -1;
-    semaphore_lock(nvs);
-    ret = nvs_read_prv(nvs, data, size);
-    semaphore_unlock(nvs);
-    return ret;
-}
-
-static int nvs_delete_prv(Nvs *nvs)
-{
-    if (nvs->start_read_addr == nvs->ate_read_addr)
-    {
-        NVS_LOG("SAME AS ATE");
-        return NVS_OK;
+        off += esz;
     }
 
-    uint16_t guard = 16;
-    while ((--guard > 0) && (nvs->start_read_addr != nvs->ate_read_addr))
+    return off;
+}
+
+/*===========================================================================
+ *  GC helper — is this entry superseded?
+ *
+ *  An entry at (src_sector_idx, src_offset) is superseded if:
+ *  a) A later entry for the same key exists in a higher-seq sector, OR
+ *  b) A later entry for the same key exists later in the same sector.
+ *===========================================================================*/
+
+static int is_superseded(
+    const uint8_t *key, uint8_t key_len, uint8_t src_sector_idx, uint32_t src_offset)
+{
+    uint32_t src_base = sector_addr(src_sector_idx);
+    uint32_t src_magic, src_seq;
+    read_sector_hdr(src_base, &src_magic, &src_seq);
+
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
-        NvsAte block = BLOCK_INIT_VALUE;
-        read_meta_block(nvs->start_read_addr, &block);
-        MetaBlockStatus status = get_block_status(&block, nvs->start_read_addr & OFFSET_ADDR_MASK);
-        if ((status == META_BLOCK_IS_VALID) || (status == META_BLOCK_NOT_VALID))
+        uint32_t base = sector_addr(i);
+        uint32_t magic, seq;
+        if (!read_sector_hdr(base, &magic, &seq))
         {
-            uint32_t sector_base = nvs->start_read_addr & ADDR_SECT_MASK;
-            block.id             = 0;
-            serial_flash_mem_write(nvs->start_read_addr, &block, sizeof(NvsAte));
-            NVS_LOG("Updated delete_addr: %lu\r\n", nvs->start_read_addr);
-            nvs->start_read_addr -= sizeof(NvsAte);
+            continue;
         }
-        else if (status == META_BLOCK_CLOSING)
+
+        int same_sector = (i == src_sector_idx);
+
+        /* Cross-sector: only check higher-seq sectors. */
+        if (!same_sector && seq <= src_seq)
         {
-            uint32_t sec = sector_number_from_address(nvs->start_read_addr);
-            sec          = next_sector(nvs, sec);
-            NVS_LOG("Updated delete_addr: %lu\r\n", nvs->start_read_addr);
-            nvs->start_read_addr = (sec * nvs->sector_size) + nvs->sector_size - sizeof(NvsAte);
+            continue;
         }
-        else if (status == META_BLOCK_ZERO)
+
+        uint32_t off = NVS_SECTOR_HDR_SIZE;
+
+        while (off < SECTOR_SIZE)
         {
-            nvs->start_read_addr -= sizeof(NvsAte);
-        }
-        else if (status == META_BLOCK_ERASED)
-        {
-            NVS_LOG("in delete about to brake because of erased \r\n");
-            NVS_LOG("Updated delete_addr: %lu\r\n", nvs->start_read_addr);
-            break;
-        }
-    }
-    return NVS_OK;
-}
+            uint8_t kl, dl;
+            uint32_t crc;
+            uint8_t st = read_entry_hdr(base + off, &kl, &dl, &crc);
 
-int nvs_delete(Nvs *nvs)
-{
-    if (nvs->ready == false)
-    {
-        return NVS_NOT_READY;
-    }
-    int ret = -1;
-    semaphore_lock(nvs);
-    ret = nvs_delete_prv(nvs);
-    semaphore_unlock(nvs);
-    return ret;
-}
-
-//------------------------------------------------------------------------------------------------------------
-
-static void write_meta_block(Nvs *nvs, uint16_t data_len, uint32_t data_offset)
-{
-    NvsAte block = BLOCK_INIT_VALUE;
-
-    const uint32_t SEC_BASE_ADDR = nvs->ate_write_addr & ADDR_SECT_MASK;
-    uint16_t       id            = ((SEC_BASE_ADDR + nvs->sector_size) - nvs->ate_write_addr) / sizeof(NvsAte);
-
-    ASSERT(id > 0);
-    ASSERT(id < MAXIMUM_VALID_ID);
-
-    block.id     = id;
-    block.offset = data_offset & OFFSET_ADDR_MASK;  // Use passed offset, not nvs->data_write_addr!
-    block.len    = data_len;
-    block.part   = 0xFF;
-    block.crc8   = crc8((uint8_t *)&block, sizeof(NvsAte) - 1);
-
-    serial_flash_mem_write(nvs->ate_write_addr, &block, sizeof(NvsAte));
-
-    nvs->ate_write_addr -= sizeof(NvsAte);
-}
-
-static void write_closing(Nvs *nvs)
-{
-    NvsAte block = BLOCK_INIT_VALUE;
-
-    block.id     = 0xFFFF;
-    block.offset = nvs->ate_write_addr & OFFSET_ADDR_MASK;
-    block.len    = 0;
-    block.part   = 0xFF;
-    block.crc8   = crc8((uint8_t *)&block, sizeof(NvsAte) - 1);
-    serial_flash_mem_write(nvs->ate_write_addr, &block, sizeof(NvsAte));
-}
-
-static void write_data(Nvs *nvs, void *data, uint16_t data_len)
-{
-    uint32_t addr_to_write = nvs->data_write_addr;
-    int32_t  remaining     = data_len;
-    uint8_t *data_ptr      = data;
-
-    do
-    {
-        const uint32_t PAGE_SIZE_LEFT = ((addr_to_write & ADDR_PAGE_MASK) + nvs->page_size) - addr_to_write;
-        uint32_t       write_len      = remaining;
-        if (write_len > PAGE_SIZE_LEFT)
-        {
-            write_len = PAGE_SIZE_LEFT;
-        }
-        serial_flash_mem_write(addr_to_write, data_ptr, write_len);
-        addr_to_write += write_len;
-        data_ptr += write_len;
-        remaining -= write_len;
-    } while (remaining > 0);
-
-    nvs->data_write_addr += data_len;
-}
-
-static MetaBlockStatus get_block_status(NvsAte *block, uint16_t offset)
-{
-    if (is_block_erased(block))
-    {
-        return META_BLOCK_ERASED;
-    }
-    if (is_meta_block_valid(block))
-    {
-        if (is_closing_block(block, offset))
-        {
-            return META_BLOCK_CLOSING;
-        }
-        else if (is_block_zero(block))
-        {
-            return META_BLOCK_ZERO;
-        }
-        else
-        {
-            return META_BLOCK_IS_VALID;
-        }
-    }
-    else
-    {
-        if (is_block_zero(block))
-        {
-            return META_BLOCK_ZERO;
-        }
-        else
-        {
-            return META_BLOCK_NOT_VALID;
-        }
-    }
-}
-
-static int read_meta_block(uint32_t addr, NvsAte *block)
-{
-    ASSERT(addr % sizeof(NvsAte) == 0);
-    return serial_flash_mem_read(addr, block, sizeof(NvsAte));
-}
-
-static void clear_address_pointers(Nvs *nvs)
-{
-    nvs->ate_write_addr  = 0;
-    nvs->ate_read_addr   = 0;
-    nvs->start_read_addr = 0;
-    nvs->data_write_addr = 0;
-}
-
-static int find_write_addr(Nvs *nvs)
-{
-    //! Initialize both write and read pointers.
-    nvs->ate_write_addr  = 0;
-    nvs->ate_read_addr   = 0;
-    nvs->start_read_addr = 0;
-    nvs->data_write_addr = 0;
-
-    //! Start from the beginning sequentially up to the last sector.
-    for (uint32_t sec = nvs->first_sector; sec <= nvs->last_sector; sec++)
-    {
-        const uint32_t SEC_BASE_ADDR    = nvs->sector_size * sec;
-        const uint32_t FIRST_BLOCK_ADDR = SEC_BASE_ADDR + nvs->sector_size - sizeof(NvsAte);
-        uint32_t       block_addr       = FIRST_BLOCK_ADDR;
-
-        uint32_t valid_blocks_count               = 0;
-        uint32_t zero_blocks_count                = 0;
-        uint32_t blocks_count                     = 0;
-        uint32_t consecutive_invalid_blocks_count = 0;
-        uint32_t erased_blocks_found              = 0;
-        do
-        {
-            NvsAte block = BLOCK_INIT_VALUE;
-            blocks_count++;
-            read_meta_block(block_addr, &block);
-
-            MetaBlockStatus status = get_block_status(&block, (block_addr & BLOCK_OFFSET_MASK));
-            if (status != META_BLOCK_NOT_VALID)
-            {
-                consecutive_invalid_blocks_count = 0;
-            }
-            if (status == META_BLOCK_ERASED)
-            {
-                erased_blocks_found++;
-                if (block_addr == FIRST_BLOCK_ADDR)
-                {
-                    //! First block is erased. This sector is our potential write head
-                    //! if we have already found data in previous sectors or if this is the first sector.
-                    nvs->ate_write_addr  = block_addr;
-                    nvs->data_write_addr = SEC_BASE_ADDR;
-                    return 0;
-                }
-                else
-                {
-                    nvs->ate_write_addr = block_addr;
-                    return 0;
-                }
-                break;
-            }
-            else if (status == META_BLOCK_CLOSING)
+            if (st != NVS_ENTRY_VALID)
             {
                 break;
             }
-            else if (status == META_BLOCK_ZERO)
+
+            /* Within the same sector: only check entries AFTER src_offset. */
+            if (same_sector && off <= src_offset)
             {
-                zero_blocks_count++;
-                nvs->data_write_addr = SEC_BASE_ADDR + block.offset + block.len;
+                off += entry_total_size(kl, dl);
+                continue;
             }
-            else if (status == META_BLOCK_IS_VALID)
+
+            if (kl == key_len)
             {
-                //! Assign the address of the first valid block within the head.
-                //! This is in case only one sector is currently used.
-                valid_blocks_count++;
-                nvs->data_write_addr = SEC_BASE_ADDR + block.offset + block.len;
-            }
-            else if (status == META_BLOCK_NOT_VALID)
-            {
-                if (consecutive_invalid_blocks_count++ > 16)
+                uint8_t flash_key[NVS_MAX_KEY_LEN];
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                if (memcmp(flash_key, key, kl) == 0)
                 {
-                    nvs->ate_write_addr  = 0;
-                    nvs->data_write_addr = 0;
-                    erase_sector(nvs, sec);
-                    break;
+                    return 1;
                 }
             }
 
-            block_addr -= sizeof(NvsAte);
-
-        } while ((block_addr >= SEC_BASE_ADDR) && (blocks_count < 7280));
-    }
-    return -1;
-}
-
-static int find_read_addr(Nvs *nvs)
-{
-    NVS_LOG("\r\n[NVS] === FIND READ ADDR START ===\r\n");
-    NVS_LOG("[NVS] Write head at: %lu (sec %lu)\r\n", nvs->ate_write_addr, (nvs->ate_write_addr & ADDR_SECT_MASK) >> 16);
-    nvs->ate_read_addr   = nvs->ate_write_addr;
-    nvs->start_read_addr = nvs->ate_write_addr;
-
-    //! The sector where write_addr is.
-    const uint32_t WRITE_SEC     = sector_number_from_address(nvs->ate_write_addr);
-    const uint32_t total_sectors = (nvs->last_sector - nvs->first_sector) + 1;
-
-    //! Scan ALL sectors in chronological order, starting from next_sector(WRITE_SEC)
-    //! (the oldest populated sector) and ending with WRITE_SEC itself (last resort).
-    //!
-    //! This guarantees FIFO oldest-first on remount:
-    //!   Multi-sector case: the oldest non-write sector contains old data and is found first.
-    //!   Single-sector / fresh-start: all non-write sectors are empty, so we fall through and
-    //!   find the oldest ATE in the write sector itself on the final iteration.
-    uint32_t sec = next_sector(nvs, WRITE_SEC);
-
-    NVS_LOG("[NVS] Searching %lu sectors starting from sec %lu (oldest)\r\n", total_sectors, sec);
-    for (uint32_t i = 0; i < total_sectors; i++)
-    {
-        const uint32_t SEC_BASE_ADDR    = nvs->sector_size * sec;
-        const uint32_t FIRST_BLOCK_ADDR = SEC_BASE_ADDR + nvs->sector_size - sizeof(NvsAte);
-        uint32_t       block_addr       = FIRST_BLOCK_ADDR;
-
-        uint32_t blocks_count                     = 0;
-        uint32_t consecutive_invalid_blocks_count = 0;
-        do
-        {
-            NvsAte block = BLOCK_INIT_VALUE;
-            blocks_count++;
-            read_meta_block(block_addr, &block);
-
-            MetaBlockStatus status = get_block_status(&block, (block_addr & BLOCK_OFFSET_MASK));
-            if (status != META_BLOCK_NOT_VALID)
-            {
-                consecutive_invalid_blocks_count = 0;
-            }
-
-            if (status == META_BLOCK_ERASED)
-            {
-                break;
-            }
-            else if (status == META_BLOCK_IS_VALID)
-            {
-                NVS_LOG("[NVS] Found valid tail at: %lu (sec %lu)\r\n", block_addr, sec);
-                nvs->ate_read_addr   = block_addr;
-                nvs->start_read_addr = block_addr;
-                NVS_LOG("[NVS] === FIND READ ADDR END: tail=%lu ===\r\n\r\n", nvs->ate_read_addr);
-                return 0;
-            }
-            else if (status == META_BLOCK_CLOSING)
-            {
-                break;
-            }
-            else if (status == META_BLOCK_NOT_VALID)
-            {
-                if (++consecutive_invalid_blocks_count >= 16)
-                {
-                    break;
-                }
-            }
-
-            block_addr -= sizeof(NvsAte);
-
-        } while ((block_addr >= SEC_BASE_ADDR) && (blocks_count < 7280));
-
-        NVS_LOG("[NVS] No valid tail in sec %lu, moving to next\r\n", sec);
-        sec = next_sector(nvs, sec);
+            off += entry_total_size(kl, dl);
+        }
     }
 
-    NVS_LOG("[NVS] === FIND READ ADDR END: tail=%lu (NVS empty) ===\r\n\r\n", nvs->ate_read_addr);
     return 0;
 }
 
-/**
- * @brief Checks if a block is erased.
- *
- * @param block Pointer to the block.
- * @return True if the block is erased, otherwise false.
- */
-static bool is_block_erased(NvsAte *block)
+/*===========================================================================
+ *  Activate next empty sector
+ *===========================================================================*/
+
+static nvs_err_t activate_next_sector(void)
 {
-    if ((block->id == 0xFFFF) && (block->offset == 0xFFFF) && (block->len == 0xFFFF) && (block->part == 0xFF) &&
-        (block->crc8 == 0xFF))
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
-        return true;
+        uint32_t base = sector_addr(i);
+        uint32_t magic, seq;
+
+        if (!read_sector_hdr(base, &magic, &seq) && magic == 0xFFFFFFFFU)
+        {
+            gNvs.seq_counter++;
+            write_sector_hdr(base, gNvs.seq_counter);
+            gNvs.active_sector_addr = base;
+            gNvs.write_offset = NVS_SECTOR_HDR_SIZE;
+            return NVS_OK;
+        }
     }
-    return false;
+
+    return NVS_ERR_NO_SPACE;
 }
 
-/**
- * @brief Checks if a block contains all zeros.
- *
- * @param block Pointer to the block.
- * @return True if the block contains all zeros, otherwise false.
- */
-static bool is_block_zero(NvsAte *block)
+/*===========================================================================
+ *  Garbage collection
+ *===========================================================================*/
+
+static nvs_err_t nvs_gc(void)
 {
-    if ((block->id == 0) && (block->part == 0xFF))
+    /* Find the valid sector with the lowest seq (oldest), excluding active. */
+    uint32_t lowest_seq = 0xFFFFFFFFU;
+    int target_idx = -1;
+
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
-        return true;
+        uint32_t base = sector_addr(i);
+        uint32_t magic, seq;
+
+        if (!read_sector_hdr(base, &magic, &seq))
+        {
+            continue;
+        }
+        if (base == gNvs.active_sector_addr)
+        {
+            continue;
+        }
+
+        if (seq < lowest_seq)
+        {
+            lowest_seq = seq;
+            target_idx = (int)i;
+        }
     }
-    return false;
+
+    if (target_idx < 0)
+    {
+        return NVS_ERR_NO_SPACE;
+    }
+
+    uint32_t target_base = sector_addr((uint8_t)target_idx);
+
+    /* Copy each live (non-superseded) entry to the active sector. */
+    uint32_t off = NVS_SECTOR_HDR_SIZE;
+
+    while (off < SECTOR_SIZE)
+    {
+        uint8_t kl, dl;
+        uint32_t crc;
+        uint8_t st = read_entry_hdr(target_base + off, &kl, &dl, &crc);
+
+        if (st != NVS_ENTRY_VALID)
+        {
+            break;
+        }
+
+        uint32_t esz = entry_total_size(kl, dl);
+
+        uint8_t flash_key[NVS_MAX_KEY_LEN];
+        DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+
+        if (!is_superseded(flash_key, kl, (uint8_t)target_idx, off))
+        {
+            if (gNvs.write_offset + esz > SECTOR_SIZE)
+            {
+                return NVS_ERR_NO_SPACE;
+            }
+
+            uint8_t data_buf[NVS_MAX_DATA_LEN];
+            uint8_t entry[NVS_ENTRY_HDR_SIZE + NVS_MAX_KEY_LEN + NVS_MAX_DATA_LEN + 8U];
+            DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE + kl, data_buf, dl);
+
+            memset(entry, 0xFF, esz);
+            entry[0] = NVS_ENTRY_VALID;
+            entry[1] = kl;
+            entry[2] = dl;
+            entry[3] = 0xFF;
+
+            uint32_t c = compute_entry_crc(kl, dl, flash_key, data_buf);
+            entry[4] = (uint8_t)(c);
+            entry[5] = (uint8_t)(c >> 8);
+            entry[6] = (uint8_t)(c >> 16);
+            entry[7] = (uint8_t)(c >> 24);
+
+            memcpy(&entry[NVS_ENTRY_HDR_SIZE], flash_key, kl);
+            memcpy(&entry[NVS_ENTRY_HDR_SIZE + kl], data_buf, dl);
+
+            DRV_WRITE(gNvs.active_sector_addr + gNvs.write_offset, entry, (uint16_t)esz);
+            gNvs.write_offset += esz;
+        }
+
+        off += esz;
+    }
+
+    DRV_ERASE(target_base);
+    return NVS_OK;
 }
 
-/**
- * @brief Checks if the given block is a closing block.
- *
- * This function determines whether the provided block is a closing block based on various
- * criteria, including its ID, offset, and length.
- *
- * @param block Pointer to the `NvsAte` block to be checked.
- * @param offset Offset value associated with the block.
- * @return Returns `true` if the block is a closing block, `false` otherwise.
- */
-static bool is_closing_block(const NvsAte *block, uint16_t offset)
+/*===========================================================================
+ *  Public API — nvs_mount
+ *===========================================================================*/
+
+nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
 {
-    if (block->id != 0xFFFF)
+    if (driver == NULL || driver->write == NULL || driver->read == NULL
+        || driver->erase_sector == NULL || driver->sector_size == 0 || driver->sector_count == 0)
     {
-        return false;
+        return NVS_ERR_INVALID_ARG;
     }
-    else if (block->offset != offset)
+
+    gNvs.driver = *driver;
+    gNvs.seq_counter = 0;
+
+    uint32_t best_seq = 0;
+    int best_idx = -1;
+
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
-        return false;
+        uint32_t magic, seq;
+        if (read_sector_hdr(sector_addr(i), &magic, &seq))
+        {
+            if (seq > gNvs.seq_counter)
+            {
+                gNvs.seq_counter = seq;
+            }
+            if (seq >= best_seq)
+            {
+                best_seq = seq;
+                best_idx = (int)i;
+            }
+        }
     }
-    else if (block->len != 0)
+
+    if (best_idx < 0)
     {
-        return false;
+        /* First-time format: write sector 0 header. */
+        gNvs.seq_counter = 1;
+        write_sector_hdr(sector_addr(0), 1);
+        gNvs.active_sector_addr = sector_addr(0);
+        gNvs.write_offset = NVS_SECTOR_HDR_SIZE;
+        return NVS_OK;
     }
-    else if (block->part != 0xFF)
-    {
-        return false;
-    }
-    else
-    {
-        return (true);
-    }
+
+    gNvs.active_sector_addr = sector_addr((uint8_t)best_idx);
+    gNvs.write_offset = scan_write_offset(gNvs.active_sector_addr);
+    return NVS_OK;
 }
 
-/**
- * @brief Checks if the provided meta block is valid.
- *
- * This function verifies the validity of the provided meta block based on various criteria
- * such as CRC, ID, partition, and length.
- *
- * @param meta_ptr Pointer to the `NvsAte` meta block to be checked.
- * @return Returns `true` if the meta block is valid, `false` otherwise.
- */
-static bool is_meta_block_valid(const NvsAte *meta_ptr)
+/*===========================================================================
+ *  Public API — nvs_write
+ *===========================================================================*/
+
+nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
 {
-    if (meta_ptr == NULL)
+    if (key == NULL || data == NULL)
     {
-        return false;
+        return NVS_ERR_INVALID_ARG;
     }
-    if (meta_ptr->crc8 != crc8((uint8_t *)meta_ptr, sizeof(NvsAte) - 1))
+
+    uint8_t key_len = (uint8_t)strlen(key);
+    if (key_len == 0 || key_len > NVS_MAX_KEY_LEN)
     {
-        return false;
+        return NVS_ERR_INVALID_ARG;
     }
-    if ((meta_ptr->id > MAXIMUM_VALID_ID) && ((meta_ptr->id != 0xFFFF)))
+    if (len > NVS_MAX_DATA_LEN)
     {
-        return false;
+        return NVS_ERR_INVALID_ARG;
     }
-    if (meta_ptr->part != 0xFF)
+
+    uint32_t esz = entry_total_size(key_len, len);
+
+    if (gNvs.write_offset + esz > SECTOR_SIZE)
     {
-        return false;
+        nvs_err_t rc = activate_next_sector();
+        if (rc != NVS_OK)
+        {
+            rc = nvs_gc();
+            if (rc != NVS_OK)
+            {
+                return NVS_ERR_NO_SPACE;
+            }
+
+            rc = activate_next_sector();
+            if (rc != NVS_OK)
+            {
+                return NVS_ERR_NO_SPACE;
+            }
+        }
     }
-    if (meta_ptr->len > MAXIMUM_DATA_LEN)
-    {
-        return false;
-    }
-    return true;
+
+    /* Build and write the entire entry atomically to an erased location. */
+    uint8_t entry[NVS_ENTRY_HDR_SIZE + NVS_MAX_KEY_LEN + NVS_MAX_DATA_LEN + 8U];
+    memset(entry, 0xFF, esz);
+
+    entry[0] = NVS_ENTRY_VALID;
+    entry[1] = key_len;
+    entry[2] = len;
+    entry[3] = 0xFF;
+
+    uint32_t crc = compute_entry_crc(key_len, len, (const uint8_t *)key, (const uint8_t *)data);
+    entry[4] = (uint8_t)(crc);
+    entry[5] = (uint8_t)(crc >> 8);
+    entry[6] = (uint8_t)(crc >> 16);
+    entry[7] = (uint8_t)(crc >> 24);
+
+    memcpy(&entry[NVS_ENTRY_HDR_SIZE], key, key_len);
+    memcpy(&entry[NVS_ENTRY_HDR_SIZE + key_len], data, len);
+
+    DRV_WRITE(gNvs.active_sector_addr + gNvs.write_offset, entry, (uint16_t)esz);
+    gNvs.write_offset += esz;
+
+    return NVS_OK;
 }
 
-static inline uint32_t next_sector(const Nvs *nvs, uint32_t sec_num)
+/*===========================================================================
+ *  Public API — nvs_read
+ *===========================================================================*/
+
+nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_len)
 {
-    return (sec_num == nvs->last_sector) ? nvs->first_sector : (sec_num + 1);
+    if (key == NULL || buf == NULL || out_len == NULL)
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    uint8_t key_len = (uint8_t)strlen(key);
+    if (key_len == 0 || key_len > NVS_MAX_KEY_LEN)
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    uint8_t indices[16];
+    uint8_t count;
+    get_sectors_by_seq_desc(indices, &count);
+
+    for (uint8_t s = 0; s < count; s++)
+    {
+        uint32_t base = sector_addr(indices[s]);
+        uint32_t off = NVS_SECTOR_HDR_SIZE;
+
+        uint32_t match_off = 0;
+        uint8_t match_dl = 0;
+        int found = 0;
+
+        while (off < SECTOR_SIZE)
+        {
+            uint8_t kl, dl;
+            uint32_t crc;
+            uint8_t st = read_entry_hdr(base + off, &kl, &dl, &crc);
+
+            if (st != NVS_ENTRY_VALID)
+            {
+                break; /* 0xFF = erased = end of log */
+            }
+
+            if (kl == key_len)
+            {
+                uint8_t flash_key[NVS_MAX_KEY_LEN];
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                if (memcmp(flash_key, key, kl) == 0)
+                {
+                    match_off = off;
+                    match_dl = dl;
+                    found = 1;
+                }
+            }
+
+            off += entry_total_size(kl, dl);
+        }
+
+        if (found)
+        {
+            uint8_t kl2, dl2;
+            uint32_t stored_crc;
+            read_entry_hdr(base + match_off, &kl2, &dl2, &stored_crc);
+
+            uint8_t key_buf[NVS_MAX_KEY_LEN];
+            uint8_t data_buf[NVS_MAX_DATA_LEN];
+            DRV_READ(base + match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
+            DRV_READ(base + match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
+
+            uint32_t calc_crc = compute_entry_crc(kl2, dl2, key_buf, data_buf);
+            if (calc_crc != stored_crc)
+            {
+                return NVS_ERR_CRC;
+            }
+            if (match_dl > buf_size)
+            {
+                return NVS_ERR_INVALID_ARG;
+            }
+
+            memcpy(buf, data_buf, match_dl);
+            *out_len = match_dl;
+            return NVS_OK;
+        }
+    }
+
+    return NVS_ERR_NOT_FOUND;
 }
 
-static inline uint32_t sector_number_from_address(uint32_t addr)
-{
-    return (addr & ADDR_SECT_MASK) >> 16;
-}
+/*===========================================================================
+ *  Public API — nvs_delete
+ *  Writes a zero-length tombstone entry. nvs_read returns the tombstone
+ *  (dl=0) which callers can treat as absent.
+ *===========================================================================*/
 
-/**
- * @brief Erases the specified sector in the non-volatile storage.
- *
- * This function erases a 64k block at the specified sector address.
- *
- * @param nvs Pointer to the `Nvs` structure.
- * @param sec_num Sector number to be erased.
- */
-static void erase_sector(Nvs *nvs, uint16_t sec_num)
+nvs_err_t nvs_delete(const char *key)
 {
-    const uint32_t addr = get_sector_address(nvs, sec_num);
-    serial_flash_mem_erase_64k_block(addr);
-}
+    if (key == NULL)
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
 
-static uint32_t get_sector_address(Nvs *nvs, int sec_num)
-{
-    return sec_num * nvs->sector_size;
-}
-
-/**
- * @brief Prints the metadata information.
- *
- * This function prints the ID, offset, length, part, and CRC8 value of the given metadata structure.
- *
- * @param meta Pointer to the `NvsAte` structure containing the metadata.
- */
-static void print_meta(NvsAte *meta)
-{
-    NVS_LOG("Meta:\r\n");
-    NVS_LOG("id = %d\r\n", meta->id);
-    NVS_LOG("offset = %d\r\n", meta->offset);
-    NVS_LOG("len = %d\r\n", meta->len);
-    NVS_LOG("part = %d\r\n", meta->part);
-    NVS_LOG("crc8 = %d\r\n", meta->crc8);
+    uint8_t dummy = 0;
+    return nvs_write(key, &dummy, 0);
 }
