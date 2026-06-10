@@ -58,11 +58,11 @@ add_subdirectory(cmake/stm32cubemx)
 
 add_subdirectory(Core/Src/bg96)
 add_subdirectory(Core/Src/drv8825)
-add_subdirectory(Core/Src/serial_flash_mem)
 add_subdirectory(Core/Src/trace_logger)
 add_subdirectory(Core/Src/assert_macro)
 add_subdirectory(Core/Src/crc_gen)
 add_subdirectory(Core/Src/nvs)
+add_subdirectory(Core/Src/stm32u5_flash_driver)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -90,6 +90,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       freertos_kernel
                       drv8825
                       nvs
+                      stm32u5_flash_driver
+                      crc8
                       )
 
 

@@ -1,11 +1,13 @@
 #include "main.h"
 #include "FreeRTOS.h"
 #include "stm32u545xx.h"
-#include "stm32u5xx.h" // Or a more specific system header if needed
+#include "stm32u5xx.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_gpio.h"
 #include "stm32u5xx_ll_usart.h"
 #include "task.h"
+#include "nvs.h"
+#include "stm32u5_flash_driver.h"
 
 
 
@@ -34,20 +36,48 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName)
 }
 
 
+static void nvs_init(void)
+{
+    nvs_flash_driver_t driver = stm32u5_flash_driver_get();
+    nvs_err_t err = nvs_mount(&driver);
+    if (err == NVS_OK)
+    {
+        printf("NVS mounted successfully\n\r");
+    }
+    else
+    {
+        printf("NVS mount failed: %d\n\r", err);
+    }
+}
+
 static void test_task(void* args)
 {
+    vTaskDelay(pdMS_TO_TICKS(1000));
     printf("Test task started\n\r");
 
-    uint32_t step_count = 0;
+    nvs_init();
+
+
+    const char test_key[] = "device_id";
+    const uint8_t test_data[] = {0x12, 0x34, 0x56, 0x78};
+    uint8_t read_buffer[16];
+    uint8_t read_len = 0;
+
+    nvs_err_t err = nvs_write(test_key, test_data, sizeof(test_data));
+    printf("NVS write result: %d\n\r", err);
+
+    err = nvs_read(test_key, read_buffer, sizeof(read_buffer), &read_len);
+    printf("NVS read result: %d, len: %d\n\r", err, read_len);
+    if (err == NVS_OK && read_len == sizeof(test_data))
+    {
+        printf("Data match: %02x %02x %02x %02x\n\r",
+               read_buffer[0], read_buffer[1], read_buffer[2], read_buffer[3]);
+    }
 
     while (1)
     {
         BSP_LED_Toggle(LED_GREEN);
-
         vTaskDelay(pdMS_TO_TICKS(1000));
-        // motor_direction_set(diretion); // Set direction to one way
-        // diretion = !diretion; // Toggle direction
-
     }
 }
 
