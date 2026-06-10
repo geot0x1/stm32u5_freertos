@@ -6,7 +6,6 @@
 #include "stm32u5xx_ll_gpio.h"
 #include "stm32u5xx_ll_usart.h"
 #include "task.h"
-#include "drv8825.h"
 
 
 
@@ -35,34 +34,15 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName)
 }
 
 
-
-static Drv8825 motor = {
-    .step_port = GPIOB,
-    .step_pin = GPIO_PIN_10,
-    .dir_port = GPIOA,
-    .dir_pin = GPIO_PIN_8,
-    .enable_port = GPIOB,
-    .enable_pin = GPIO_PIN_4,
-};
-
 static void test_task(void* args)
 {
     printf("Test task started\n\r");
 
-
-    motor_init(&motor);
-    motor_enable(&motor);
-
     uint32_t step_count = 0;
-    int diretion = 0;
-    
+
     while (1)
     {
         BSP_LED_Toggle(LED_GREEN);
-
-        motor_enable(&motor);
-        motor_steps(&motor, 200); // Adjust the number of steps as needed
-        motor_disable(&motor);
 
         vTaskDelay(pdMS_TO_TICKS(1000));
         // motor_direction_set(diretion); // Set direction to one way

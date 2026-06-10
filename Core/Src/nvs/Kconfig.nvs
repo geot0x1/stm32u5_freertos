@@ -1,0 +1,7 @@
+menu "NVS configuration"
+
+config NVS_MODULE_DEBUG
+	bool "Enable NVS debugging using trace logger"
+	default n
+
+endmenu
